@@ -1,0 +1,18 @@
+services:
+  todo:
+    build: .
+    # Or use a prebuilt image: image: todo:latest
+    container_name: todo
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - DB_PATH=/data/todo.db
+      - PORT=8080
+      - TZ=Asia/Shanghai   # 改成你的时区，如 Asia/Shanghai / UTC / America/New_York
+    volumes:
+      # 把容器内 SQLite 数据目录 /data 映射到宿主机 ./data。
+      # 数据库文件落盘在宿主机 ./data/todo.db（以及可能的 -wal / -shm 副文件）。
+      # 整目录映射是 SQLite 推荐方式，可一并持久化 WAL 副文件，避免单文件映射导致的锁/损坏问题。
+      # 停止容器后直接备份 ./data 目录即可。
+      - ./data:/data

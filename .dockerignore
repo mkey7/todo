@@ -1,0 +1,14 @@
+data/
+*.db
+*.db-shm
+*.db-wal
+.git/
+.idea/
+.vscode/
+.claude/
+bin/
+*.test
+Dockerfile
+docker-compose.yml
+.dockerignore
+README.md
