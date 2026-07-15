@@ -225,3 +225,60 @@ body {
 .modal-body label { color: var(--muted); font-size: 12px; }
 .modal-body .field { display: flex; flex-direction: column; gap: 4px; }
 .modal-body .row { display: flex; gap: 8px; }
+
+/* heatmap */
+.heatmap-nav { display: flex; align-items: center; justify-content: center; padding: 8px 0; }
+.heatmap-grid {
+  display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px;
+  max-width: 500px; margin: 0 auto;
+}
+.heatmap-header {
+  text-align: center; font-size: 11px; color: var(--muted); padding: 4px 0;
+}
+.heatmap-cell {
+  aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
+  font-size: 12px; border-radius: 6px; cursor: default;
+  background: var(--panel-2); color: var(--muted);
+}
+.heatmap-cell.filled {
+  --h: 220; --s: 70%; --l: calc(25% + var(--intensity, 0) * 35%);
+  background: hsl(var(--h), var(--s), var(--l));
+  color: hsl(var(--h), 40%, calc(50% + var(--intensity, 0) * 40%));
+  font-weight: 600;
+}
+.heatmap-cell.empty { background: transparent; }
+.heatmap-cell.today {
+  border: 2px solid var(--primary);
+}
+.heatmap-legend {
+  display: flex; align-items: center; justify-content: center; gap: 4px;
+  margin-top: 8px; margin-bottom: 4px;
+}
+.heatmap-legend .legend-label { font-size: 11px; color: var(--muted); }
+.heatmap-legend .legend-swatch {
+  width: 14px; height: 14px; border-radius: 3px;
+  background: hsl(220, 70%, calc(25% + var(--intensity, 0) * 35%));
+}
+
+/* todo analysis panel */
+#todo-analysis-panel { margin-top: 16px; }
+#todo-analysis-panel .analysis-head {
+  display: flex; justify-content: space-between; align-items: center;
+}
+#todo-analysis-panel h3 { margin: 0; }
+#todo-analysis-panel h4 { margin: 12px 0 6px; color: var(--muted); font-size: 13px; }
+
+/* date label on timeline */
+.tl-date-label { font-size: 12px; color: var(--muted); margin-top: 10px; margin-bottom: 4px; }
+
+/* pie chart */
+.pie-chart-wrap { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+.pie-svg { flex-shrink: 0; }
+.pie-slice { transition: opacity 0.15s; cursor: pointer; }
+.pie-slice:hover { opacity: 0.8; }
+.pie-center-text { font-size: 13px; font-weight: 700; fill: var(--text); }
+.pie-legend { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 200px; }
+.pie-legend-item { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.pie-legend-dot { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+.pie-legend-name { color: var(--text); flex: 1; }
+.pie-legend-pct { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }

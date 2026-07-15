@@ -156,6 +156,9 @@ func CreateEntry(db *sql.DB, e models.TimeEntry) (models.TimeEntry, error) {
 	if e.StartTime == "" {
 		e.StartTime = tutil.Now()
 	}
+	if e.EndTime != nil && *e.EndTime != "" && *e.EndTime <= e.StartTime {
+		return models.TimeEntry{}, fmt.Errorf("结束时间必须晚于开始时间")
+	}
 	if e.GroupID == nil && e.TodoID != nil {
 		var g sql.NullInt64
 		if err := db.QueryRow(`SELECT group_id FROM todos WHERE id = ?`, *e.TodoID).Scan(&g); err == nil && g.Valid {
@@ -177,6 +180,9 @@ func CreateEntry(db *sql.DB, e models.TimeEntry) (models.TimeEntry, error) {
 
 // UpdateEntry replaces editable fields of an entry.
 func UpdateEntry(db *sql.DB, id int64, e models.TimeEntry) (models.TimeEntry, error) {
+	if e.EndTime != nil && *e.EndTime != "" && *e.EndTime <= e.StartTime {
+		return models.TimeEntry{}, fmt.Errorf("结束时间必须晚于开始时间")
+	}
 	if e.GroupID == nil && e.TodoID != nil {
 		var g sql.NullInt64
 		if err := db.QueryRow(`SELECT group_id FROM todos WHERE id = ?`, *e.TodoID).Scan(&g); err == nil && g.Valid {
@@ -195,4 +201,66 @@ func UpdateEntry(db *sql.DB, id int64, e models.TimeEntry) (models.TimeEntry, er
 func DeleteEntry(db *sql.DB, id int64) error {
 	_, err := db.Exec(`DELETE FROM time_entries WHERE id = ?`, id)
 	return err
+}
+
+// ListEntriesForTodos returns all time entries for the given todo IDs (or
+// their direct child todos), ordered by start_time.
+func ListEntriesForTodos(db *sql.DB, todoIDs []int64) ([]models.TimeEntry, error) {
+	if len(todoIDs) == 0 {
+		return nil, nil
+	}
+	placeholders, args := buildPlaceholders(todoIDs)
+	rows, err := db.Query(entryQuery(`te.todo_id IN (`+placeholders+`)`, args...),
+		args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var es []models.TimeEntry
+	for rows.Next() {
+		e, err := scanEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		es = append(es, e)
+	}
+	return es, rows.Err()
+}
+
+// ListEntriesForTodosInRange returns time entries for the given todo IDs
+// that overlap [start, end) storage strings.
+func ListEntriesForTodosInRange(db *sql.DB, todoIDs []int64, start, end string) ([]models.TimeEntry, error) {
+	if len(todoIDs) == 0 {
+		return nil, nil
+	}
+	placeholders, todoArgs := buildPlaceholders(todoIDs)
+	where := fmt.Sprintf(`te.todo_id IN (%s) AND te.start_time < ? AND (te.end_time IS NULL OR te.end_time > ?)`, placeholders)
+	args := append(todoArgs, end, start)
+	rows, err := db.Query(entryQuery(where, args...), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var es []models.TimeEntry
+	for rows.Next() {
+		e, err := scanEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		es = append(es, e)
+	}
+	return es, rows.Err()
+}
+
+func buildPlaceholders(ids []int64) (string, []any) {
+	var ph string
+	args := make([]any, 0, len(ids))
+	for i, id := range ids {
+		if i > 0 {
+			ph += ", "
+		}
+		ph += "?"
+		args = append(args, id)
+	}
+	return ph, args
 }

@@ -104,6 +104,31 @@ func GetTodo(db *sql.DB, id int64) (models.Todo, error) {
 	return scanTodo(row)
 }
 
+// CollectDescendantIDs returns all descendant todo IDs for the given todo,
+// recursively collecting children, grandchildren, etc.
+func CollectDescendantIDs(db *sql.DB, id int64) ([]int64, error) {
+	rows, err := db.Query(`SELECT id FROM todos WHERE parent_id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var childID int64
+		if err := rows.Scan(&childID); err != nil {
+			return nil, err
+		}
+		ids = append(ids, childID)
+		// Recurse
+		grandIDs, err := CollectDescendantIDs(db, childID)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, grandIDs...)
+	}
+	return ids, rows.Err()
+}
+
 // CreateTodo inserts a todo. If ParentID is set, it becomes a subtask.
 func CreateTodo(db *sql.DB, t models.Todo) (models.Todo, error) {
 	if t.Title == "" {

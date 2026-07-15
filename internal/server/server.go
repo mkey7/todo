@@ -40,6 +40,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("PUT /api/todos/{id}", h.UpdateTodo)
 	mux.HandleFunc("PATCH /api/todos/{id}/status", h.PatchTodoStatus)
 	mux.HandleFunc("DELETE /api/todos/{id}", h.DeleteTodo)
+	mux.HandleFunc("GET /api/todos/{id}/time-entries", h.TodoTimeEntries)
+	mux.HandleFunc("GET /api/todos/{id}/time-entries/monthly", h.TodoTimeEntriesMonthly)
 
 	mux.HandleFunc("GET /api/time-entries", h.ListTimeEntries)
 	mux.HandleFunc("GET /api/time-entries/active", h.ActiveTimeEntry)

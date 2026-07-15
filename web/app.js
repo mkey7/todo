@@ -52,6 +52,7 @@ const state = {
   analysisWeek: '',
   todayMode: 'timer',      // 'timer' | 'backfill'
   todayShowDone: false,    // 任务列表是否显示已完成
+  timelineZoom: '24h',     // '24h' | '12h' (9-21)
 };
 
 function groupColor(id) {
@@ -69,7 +70,6 @@ async function init() {
   bindNav();
   bindToday();
   bindTodos();
-  bindTimeline();
   bindAnalysis();
   bindModal();
   await loadGroups();
@@ -94,7 +94,6 @@ function renderView(view) {
   $('#view-' + view).classList.remove('hidden');
   if (view === 'today') renderToday();
   if (view === 'todos') renderTodos();
-  if (view === 'timeline') renderTimeline();
   if (view === 'analysis') renderAnalysis();
 }
 
@@ -130,6 +129,15 @@ function bindToday() {
     const t = state.todos.find(x => String(x.id) === e.target.value);
     if (t && t.group_id) $('#timer-group').value = String(t.group_id);
   });
+  // 分组选择变化时联动过滤待办列表
+  $('#timer-group').addEventListener('change', () => {
+    const gid = $('#timer-group').value ? Number($('#timer-group').value) : null;
+    fillTodoSelect($('#timer-todo'), null, gid);
+  });
+  $('#bf-group').addEventListener('change', () => {
+    const gid = $('#bf-group').value ? Number($('#bf-group').value) : null;
+    fillTodoSelect($('#bf-todo'), null, gid);
+  });
   // 补录
   $('#bf-add').addEventListener('click', onBackfillAdd);
   // 任务与分组
@@ -139,6 +147,13 @@ function bindToday() {
     state.todayShowDone = e.target.checked;
     renderTodayTasks();
   });
+  // 时间轴缩放
+  $('#timeline-zoom-seg').addEventListener('click', e => {
+    const b = e.target.closest('.seg-btn');
+    if (!b) return;
+    state.timelineZoom = b.dataset.zoom;
+    renderTodayTimelineAnalysis();
+  });
 }
 
 function setTodayMode(mode) {
@@ -146,7 +161,10 @@ function setTodayMode(mode) {
   $$('#today-mode-seg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
   $('#today-timer-body').classList.toggle('hidden', mode !== 'timer');
   $('#today-backfill-body').classList.toggle('hidden', mode !== 'backfill');
-  if (mode === 'backfill' && !$('#bf-date').value) $('#bf-date').value = todayStr();
+  if (mode === 'backfill' && !$('#bf-date').value) {
+    $('#bf-date').value = todayStr();
+    $('#bf-end-date').value = todayStr();
+  }
 }
 
 async function renderToday() {
@@ -162,7 +180,7 @@ function renderRecorder() {
   fillTodoSelect($('#timer-todo'), null);
   fillGroupSelect($('#bf-group'), null);
   fillTodoSelect($('#bf-todo'), null);
-  if (!$('#bf-date').value) $('#bf-date').value = todayStr();
+  if (!$('#bf-date').value) { $('#bf-date').value = todayStr(); $('#bf-end-date').value = todayStr(); }
   renderTimer();
 }
 
@@ -177,11 +195,15 @@ function fillGroupSelect(sel, selectedId) {
   if (prev) sel.value = prev;
 }
 
-function fillTodoSelect(sel, selectedId) {
+function fillTodoSelect(sel, selectedId, groupId) {
   const prev = sel.value;
   sel.innerHTML = '<option value="">无</option>';
   for (const t of state.todos) {
     if (t.status === 'done') continue;
+    // Filter by group if a group is selected: show only tasks from that group or ungrouped tasks
+    if (groupId != null) {
+      if (t.group_id !== groupId && t.group_id != null) continue;
+    }
     const label = (t.children && t.children.length) ? t.title + ' …' : t.title;
     const opt = el('option', { value: t.id }, label);
     if (selectedId && Number(selectedId) === t.id) opt.selected = true;
@@ -249,15 +271,18 @@ async function onTimerToggle() {
 
 // 补录模式：手动配置起止时间
 async function onBackfillAdd() {
-  const d = $('#bf-date').value || todayStr();
+  const sd = $('#bf-date').value || todayStr();
   const st = $('#bf-start').value;
+  const ed = $('#bf-end-date').value || sd;
   const en = $('#bf-end').value;
   if (!st) { alert('请填写开始时间'); return; }
-  if (en && en <= st) { alert('结束时间需晚于开始时间'); return; }
-  if (!en && state.activeEntry) { alert('请先停止当前计时，再补录进行中的记录'); return; }
+  const startDt = `${sd} ${st}:00`;
+  const endDt = en ? `${ed} ${en}:00` : null;
+  if (endDt && endDt <= startDt) { alert('结束时间必须晚于开始时间'); return; }
+  if (!endDt && state.activeEntry) { alert('请先停止当前计时，再补录进行中的记录'); return; }
   const body = {
-    start_time: `${d} ${st}:00`,
-    end_time: en ? `${d} ${en}:00` : null,
+    start_time: startDt,
+    end_time: endDt,
     note: $('#bf-note').value.trim(),
     group_id: $('#bf-group').value ? Number($('#bf-group').value) : null,
     todo_id: $('#bf-todo').value ? Number($('#bf-todo').value) : null,
@@ -282,7 +307,9 @@ async function renderTodayTimelineAnalysis() {
   ]);
   const wrap = $('#today-timeline-wrap');
   wrap.innerHTML = '';
-  wrap.appendChild(buildTimeline(entries, true));
+  // Update zoom button active state
+  $$('#timeline-zoom-seg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.zoom === state.timelineZoom));
+  wrap.appendChild(buildTimeline(entries, true, date, state.timelineZoom));
   const host = $('#today-analysis');
   host.innerHTML = '';
   host.appendChild(renderDailyAnalysis(r));
@@ -407,6 +434,7 @@ function buildTodoRow(t, compact) {
   row.appendChild(main);
   const actions = el('div', { class: 'todo-actions' });
   if (!compact) {
+    actions.appendChild(el('button', { class: 'btn btn-small', onclick: (ev) => { ev.stopPropagation(); openTodoAnalysis(t); } }, '分析'));
     actions.appendChild(el('button', { class: 'btn btn-small', onclick: () => openTodoModal({ parent_id: t.id }) }, '子任务'));
     actions.appendChild(el('button', { class: 'btn btn-small', onclick: () => openTodoModal(t) }, '编辑'));
     actions.appendChild(el('button', { class: 'btn btn-small btn-danger', onclick: async () => { if (confirm('删除该待办及其子任务？')) { await api('DELETE', '/api/todos/' + t.id); await loadTodos(); renderView(state.view); } } }, '删除'));
@@ -421,6 +449,164 @@ function buildTodoRow(t, compact) {
   return item;
 }
 
+// ---- Todo Analysis Panel ----
+let todoAnalysisState = { todo: null, month: '' };
+
+async function openTodoAnalysis(t) {
+  const panel = $('#todo-analysis-panel');
+  panel.classList.remove('hidden');
+  panel.innerHTML = '';
+
+  todoAnalysisState.todo = t;
+  if (!todoAnalysisState.month) todoAnalysisState.month = todayStr().slice(0, 7);
+
+  const descCount = countDescendants(t);
+
+  try {
+    const [allEntries, monthEntries] = await Promise.all([
+      api('GET', '/api/todos/' + t.id + '/time-entries'),
+      api('GET', '/api/todos/' + t.id + '/time-entries/monthly?month=' + todoAnalysisState.month),
+    ]);
+    const totalSecs = allEntries.reduce((acc, e) => acc + entryDurationSecs(e), 0);
+    const totalDur = fmtDurationSecs(totalSecs);
+    const monthSecs = monthEntries.reduce((acc, e) => acc + entryDurationSecs(e), 0);
+
+    panel.appendChild(el('div', { class: 'analysis-head' },
+      el('h3', {}, '📊 ' + t.title + ' 分析'),
+      el('button', { class: 'btn btn-small', onclick: () => panel.classList.add('hidden') }, '✕ 关闭')
+    ));
+
+    // Stats grid
+    const grid = el('div', { class: 'stat-grid', style: 'margin-bottom:16px' });
+    grid.appendChild(statCard('累计总工时', totalDur, allEntries.length + ' 条记录'));
+    grid.appendChild(statCard('本月工时', fmtDurationSecs(monthSecs), monthEntries.length + ' 条记录'));
+    grid.appendChild(statCard('子任务数', String(descCount), statusLabel(t.status)));
+    panel.appendChild(grid);
+
+    // Monthly heatmap with navigation
+    panel.appendChild(el('h4', {}, '月度热力图'));
+    panel.appendChild(buildHeatmapNav());
+    panel.appendChild(buildHeatmap(monthEntries, todoAnalysisState.month));
+
+    // Legend
+    panel.appendChild(buildHeatmapLegend());
+
+    if (allEntries.length === 0) {
+      panel.appendChild(emptyHint('该待办暂没有时间记录'));
+      return;
+    }
+    panel.appendChild(el('h4', { style: 'margin-top:16px' }, '时间记录列表'));
+    for (const e of monthEntries) {
+      panel.appendChild(buildEntryRow(e, () => openTodoAnalysis(t)));
+    }
+  } catch (err) {
+    panel.appendChild(emptyHint('加载失败：' + err.message));
+  }
+}
+
+function buildHeatmapNav() {
+  const [y, m] = todoAnalysisState.month.split('-').map(Number);
+  const prevM = m === 1 ? 12 : m - 1;
+  const prevY = m === 1 ? y - 1 : y;
+  const nextM = m === 12 ? 1 : m + 1;
+  const nextY = m === 12 ? y + 1 : y;
+  const prevStr = prevY + '-' + String(prevM).padStart(2, '0');
+  const nextStr = nextY + '-' + String(nextM).padStart(2, '0');
+  const label = y + '年' + m + '月';
+
+  return el('div', { class: 'heatmap-nav' },
+    el('button', { class: 'btn btn-small', onclick: () => { todoAnalysisState.month = prevStr; openTodoAnalysis(todoAnalysisState.todo); } }, '◀'),
+    el('span', { style: 'font-weight:600;margin:0 8px' }, label),
+    el('button', { class: 'btn btn-small', onclick: () => { todoAnalysisState.month = nextStr; openTodoAnalysis(todoAnalysisState.todo); } }, '▶'),
+  );
+}
+
+function buildHeatmap(entries, month) {
+  const [year, mon] = month.split('-').map(Number);
+  const daysInMonth = new Date(year, mon, 0).getDate(); // mon is 1-based, Date month 0-based → gets last day of previous month
+  const firstDayOfWeek = new Date(year, mon - 1, 1).getDay(); // 0=Sunday
+
+  // Aggregate seconds per day
+  const secsByDay = {};
+  for (const e of entries) {
+    const d = e.start_time.slice(8, 10); // "DD"
+    const dayNum = parseInt(d, 10);
+    secsByDay[dayNum] = (secsByDay[dayNum] || 0) + entryDurationSecs(e);
+  }
+
+  // Find max for color scaling
+  const allSecs = Object.values(secsByDay);
+  const maxSecs = allSecs.length ? Math.max(...allSecs) : 1;
+
+  // Day-of-week headers (Mon-Sun)
+  const grid = el('div', { class: 'heatmap-grid' });
+  const DAYS = ['日', '一', '二', '三', '四', '五', '六'];
+  for (const d of DAYS) {
+    grid.appendChild(el('div', { class: 'heatmap-header' }, d));
+  }
+
+  // Empty cells before first day
+  for (let i = 0; i < firstDayOfWeek; i++) {
+    grid.appendChild(el('div', { class: 'heatmap-cell empty' }));
+  }
+
+  for (let day = 1; day <= daysInMonth; day++) {
+    const secs = secsByDay[day] || 0;
+    const intensity = secs > 0 ? Math.min(1, secs / Math.max(maxSecs, 3600)) : 0;
+    const dateStr = month + '-' + String(day).padStart(2, '0');
+    const title = dateStr + (secs > 0 ? ' · ' + fmtDurationSecs(secs) : '');
+    const isToday = dateStr === todayStr();
+
+    const cell = el('div', {
+      class: 'heatmap-cell' + (isToday ? ' today' : ''),
+      style: `--intensity:${intensity}`,
+      title,
+    }, String(day));
+    if (secs > 0) cell.classList.add('filled');
+    grid.appendChild(cell);
+  }
+
+  return grid;
+}
+
+function buildHeatmapLegend() {
+  return el('div', { class: 'heatmap-legend' },
+    el('span', { class: 'legend-label' }, '少'),
+    el('span', { class: 'legend-swatch', style: '--intensity:0.1' }),
+    el('span', { class: 'legend-swatch', style: '--intensity:0.3' }),
+    el('span', { class: 'legend-swatch', style: '--intensity:0.5' }),
+    el('span', { class: 'legend-swatch', style: '--intensity:0.75' }),
+    el('span', { class: 'legend-swatch', style: '--intensity:1' }),
+    el('span', { class: 'legend-label' }, '多'),
+  );
+}
+
+function countDescendants(t) {
+  if (!t.children || t.children.length === 0) return 0;
+  let n = t.children.length;
+  for (const c of t.children) n += countDescendants(c);
+  return n;
+}
+
+function entryDurationSecs(e) {
+  const start = new Date(e.start_time.replace(' ', 'T')).getTime();
+  const end = e.end_time ? new Date(e.end_time.replace(' ', 'T')).getTime() : Date.now();
+  return Math.max(0, (end - start) / 1000);
+}
+
+function fmtDurationSecs(secs) {
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (h > 0) return h + 'h ' + m + 'm';
+  if (m > 0) return m + 'm';
+  return Math.floor(secs) + 's';
+}
+
+function statusLabel(s) {
+  return s === 'done' ? '已完成' : s === 'in_progress' ? '进行中' : '待办';
+}
+
+// ---- 分组编辑 ----
 function toggleGroupEditor(group) {
   const box = $('#group-editor');
   box.classList.remove('hidden');
@@ -441,65 +627,36 @@ async function saveGroup() {
 }
 
 // ============================================================
-//  TIMELINE
+//  ANALYSIS
 // ============================================================
-function bindTimeline() {
-  $('#timeline-date').value = state.timelineDate;
-  $('#timeline-date').addEventListener('change', e => { state.timelineDate = e.target.value; renderTimeline(); });
-  $('#timeline-prev').addEventListener('click', () => shiftDate(-1));
-  $('#timeline-next').addEventListener('click', () => shiftDate(1));
-  $('#timeline-today').addEventListener('click', () => { state.timelineDate = todayStr(); $('#timeline-date').value = state.timelineDate; renderTimeline(); });
-  $('#timeline-add').addEventListener('click', () => openEntryModal(null, state.timelineDate));
-}
-function shiftDate(d) {
-  const dt = new Date(state.timelineDate + 'T00:00:00');
-  dt.setDate(dt.getDate() + d);
-  state.timelineDate = dt.toISOString().slice(0, 10);
-  $('#timeline-date').value = state.timelineDate;
-  renderTimeline();
-}
-
-async function renderTimeline() {
-  const date = state.timelineDate;
-  $('#timeline-date-label').textContent = date + (date === todayStr() ? '（今天）' : '');
-  const entries = await api('GET', '/api/time-entries?date=' + date);
-  const host = $('#timeline-host');
-  host.innerHTML = '';
-  host.appendChild(buildTimeline(entries, date === todayStr()));
-
-  const legend = $('#timeline-legend');
-  legend.innerHTML = '';
-  const gids = [...new Set(entries.map(e => e.group_id))];
-  for (const gid of gids) {
-    legend.appendChild(el('span', {}, el('i', { style: `background:${groupColor(gid)}` }), groupName(gid)));
-  }
-
-  const list = $('#timeline-entries');
-  list.innerHTML = '';
-  if (entries.length === 0) { list.appendChild(emptyHint('当天没有工时记录')); return; }
-  for (const e of entries) list.appendChild(buildEntryRow(e, () => renderTimeline()));
-}
-
-function buildTimeline(entries, showNow) {
+function buildTimeline(entries, showNow, viewDate, zoom) {
   const host = el('div', { class: 'timeline-host' });
   const wrap = el('div', {});
   if (entries.length === 0) {
     host.appendChild(el('div', { class: 'tl-empty', style: 'width:100%' }, '暂无记录'));
     wrap.appendChild(host);
-    wrap.appendChild(buildAxis());
+    wrap.appendChild(buildAxis(zoom));
     return wrap;
   }
+  // Determine visible range
+  const z = zoom || '24h';
+  const rangeStart = z === '12h' ? 9 : 0;
+  const rangeEnd = z === '12h' ? 21 : 24;
+  const rangeSecs = (rangeEnd - rangeStart) * 3600;
+
+  // Use the viewing date for dayStart calculation, not each entry's own date.
+  const dateStr = viewDate || todayStr();
+  const dayStart = new Date(dateStr + 'T00:00:00').getTime();
+  const rangeStartMs = dayStart + rangeStart * 3600 * 1000;
+  const rangeEndMs = dayStart + rangeEnd * 3600 * 1000;
   for (const e of entries) {
     const start = new Date(e.start_time.replace(' ', 'T')).getTime();
     const endSecs = e.end_time ? new Date(e.end_time.replace(' ', 'T')).getTime() : Date.now();
-    const dayStr = e.start_time.slice(0, 10);
-    const dayStart = new Date(dayStr + 'T00:00:00').getTime();
-    const dayEnd = dayStart + 24 * 3600 * 1000;
-    const s = Math.max(start, dayStart);
-    const en = Math.min(endSecs, dayEnd);
+    const s = Math.max(start, rangeStartMs);
+    const en = Math.min(endSecs, rangeEndMs);
     if (en <= s) continue;
-    const leftPct = ((s - dayStart) / (24 * 3600 * 1000)) * 100;
-    const widthPct = ((en - s) / (24 * 3600 * 1000)) * 100;
+    const leftPct = ((s - rangeStartMs) / (rangeSecs * 1000)) * 100;
+    const widthPct = ((en - s) / (rangeSecs * 1000)) * 100;
     const block = el('div', {
       class: 'tl-block',
       style: `left:${leftPct}%; width:${widthPct}%; background:${groupColor(e.group_id)}`,
@@ -510,18 +667,22 @@ function buildTimeline(entries, showNow) {
     host.appendChild(block);
   }
   if (showNow) {
-    const now = new Date();
-    const dayStart = new Date(now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0') + 'T00:00:00').getTime();
-    const pct = ((now.getTime() - dayStart) / (24 * 3600 * 1000)) * 100;
-    host.appendChild(el('div', { class: 'tl-now', style: `left:${pct}%` }));
+    const now = Date.now();
+    if (now >= rangeStartMs && now <= rangeEndMs) {
+      const pct = ((now - rangeStartMs) / (rangeSecs * 1000)) * 100;
+      host.appendChild(el('div', { class: 'tl-now', style: `left:${pct}%` }));
+    }
   }
   wrap.appendChild(host);
-  wrap.appendChild(buildAxis());
+  wrap.appendChild(buildAxis(zoom));
   return wrap;
 }
-function buildAxis() {
+function buildAxis(zoom) {
+  const z = zoom || '24h';
+  const startH = z === '12h' ? 9 : 0;
+  const endH = z === '12h' ? 21 : 24;
   const axis = el('div', { class: 'tl-axis' });
-  for (let h = 0; h < 24; h++) axis.appendChild(el('span', {}, h % 3 === 0 ? String(h) : ''));
+  for (let h = startH; h < endH; h++) axis.appendChild(el('span', {}, h % 3 === 0 ? String(h) : ''));
   return axis;
 }
 
@@ -620,9 +781,15 @@ async function renderAnalysis() {
         api('GET', '/api/time-entries?date=' + state.analysisDate),
       ]);
       // 给每日分析加上当日时间轴
-      const tlCard = el('div', { class: 'card', style: 'margin-bottom:16px' },
-        el('h3', {}, state.analysisDate + ' 时间轴'));
-      tlCard.appendChild(buildTimeline(entries, state.analysisDate === todayStr()));
+      const tlCard = el('div', { class: 'card', style: 'margin-bottom:16px' });
+      const tlHead = el('div', { class: 'panel-head', style: 'justify-content:space-between' },
+        el('h3', {}, state.analysisDate + ' 时间轴'),
+        el('div', { class: 'seg' },
+          el('button', { class: 'seg-btn' + (state.timelineZoom === '24h' ? ' active' : ''), onclick: () => { state.timelineZoom = '24h'; renderAnalysis(); } }, '全天'),
+          el('button', { class: 'seg-btn' + (state.timelineZoom === '12h' ? ' active' : ''), onclick: () => { state.timelineZoom = '12h'; renderAnalysis(); } }, '9-21'),
+        ));
+      tlCard.appendChild(tlHead);
+      tlCard.appendChild(buildTimeline(entries, state.analysisDate === todayStr(), state.analysisDate, state.timelineZoom));
       host.appendChild(tlCard);
       host.appendChild(renderDailyAnalysis(r));
     } else {
@@ -659,13 +826,7 @@ function renderDailyAnalysis(r) {
 
   wrap.appendChild(el('div', { class: 'card', style: 'margin-top:16px' },
     el('h3', {}, '分组占比'),
-    barsFromGroups(r.group_breakdown)));
-  wrap.appendChild(el('div', { class: 'card', style: 'margin-top:16px' },
-    el('h3', {}, '时段分布'),
-    barsFromParts(r.part_of_day)));
-  wrap.appendChild(el('div', { class: 'card', style: 'margin-top:16px' },
-    el('h3', {}, '每小时工作分布'),
-    buildHourBars(r.hourly_histogram)));
+    buildPieChart(r.group_breakdown)));
 
   // improvement editor
   wrap.appendChild(buildImprovementEditor(r.date, r.improvement, r.notes));
@@ -691,17 +852,12 @@ function renderWeeklyAnalysis(r) {
     buildTrendChart(r.daily_trend)));
   wrap.appendChild(el('div', { class: 'card', style: 'margin-top:16px' },
     el('h3', {}, '分组占比'),
-    barsFromGroups(r.group_breakdown)));
+    buildPieChart(r.group_breakdown)));
   return wrap;
 }
 
 function barsFromGroups(groups) {
-  const wrap = el('div', {});
-  if (!groups || groups.length === 0) { wrap.appendChild(emptyHint('无数据')); return wrap; }
-  for (const g of groups) {
-    wrap.appendChild(buildBar(g.group_name, g.percent, g.duration, g.group_color));
-  }
-  return wrap;
+  return buildPieChart(groups);
 }
 function barsFromParts(parts) {
   const wrap = el('div', {});
@@ -710,6 +866,103 @@ function barsFromParts(parts) {
   }
   return wrap;
 }
+function buildPieChart(groups) {
+  const wrap = el('div', { class: 'pie-chart-wrap' });
+  if (!groups || groups.length === 0 || groups.every(g => g.seconds < 1)) {
+    wrap.appendChild(emptyHint('无数据'));
+    return wrap;
+  }
+
+  const size = 160;
+  const r = 60;
+  const cx = 80, cy = 80;
+  let totalPercent = 0;
+
+  // Build SVG paths
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
+  svg.setAttribute('class', 'pie-svg');
+  svg.style.width = size + 'px';
+
+  let angle = -Math.PI / 2; // Start from top
+  for (const g of groups) {
+    if (g.percent < 0.5) continue; // Skip tiny slices
+    const sliceDeg = (g.percent / 100) * Math.PI * 2;
+    const x1 = cx + r * Math.cos(angle);
+    const y1 = cy + r * Math.sin(angle);
+    angle += sliceDeg;
+    const x2 = cx + r * Math.cos(angle);
+    const y2 = cy + r * Math.sin(angle);
+    const large = sliceDeg > Math.PI ? 1 : 0;
+    const d = `M${cx},${cy} L${x1},${y1} A${r},${r} 0 ${large} 1 ${x2},${y2} Z`;
+
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('fill', g.group_color);
+    path.setAttribute('stroke', 'var(--panel)');
+    path.setAttribute('stroke-width', '2');
+    path.setAttribute('class', 'pie-slice');
+    const pctLabel = g.percent.toFixed(0) + '%';
+    path.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'title')).textContent = g.group_name + ' · ' + g.duration + ' · ' + pctLabel;
+    svg.appendChild(path);
+    totalPercent += g.percent;
+  }
+
+  // Center circle + total
+  if (totalPercent < 100) {
+    // Remaining slice
+    const remDeg = ((100 - totalPercent) / 100) * Math.PI * 2;
+    const x1 = cx + r * Math.cos(angle);
+    const y1 = cy + r * Math.sin(angle);
+    angle += remDeg;
+    const x2 = cx + r * Math.cos(angle);
+    const y2 = cy + r * Math.sin(angle);
+    const d = `M${cx},${cy} L${x1},${y1} A${r},${r} 0 0 1 ${x2},${y2} Z`;
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('fill', 'var(--panel-2)');
+    path.setAttribute('stroke', 'var(--panel)');
+    path.setAttribute('stroke-width', '2');
+    svg.appendChild(path);
+  }
+
+  // Center text
+  const totalDur = groups.reduce((acc, g) => acc + g.duration.length, 0) > 0
+    ? tutilFormatDuration(groups.reduce((acc, g) => acc + g.seconds, 0))
+    : '';
+  if (totalDur) {
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('x', cx);
+    text.setAttribute('y', cy + 4);
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('class', 'pie-center-text');
+    text.textContent = totalDur;
+    svg.appendChild(text);
+  }
+
+  wrap.appendChild(svg);
+
+  // Legend
+  const legend = el('div', { class: 'pie-legend' });
+  for (const g of groups) {
+    legend.appendChild(el('div', { class: 'pie-legend-item' },
+      el('span', { class: 'pie-legend-dot', style: `background:${g.group_color}` }),
+      el('span', { class: 'pie-legend-name' }, g.group_name),
+      el('span', { class: 'pie-legend-pct' }, g.duration + ' · ' + g.percent.toFixed(0) + '%'),
+    ));
+  }
+  wrap.appendChild(legend);
+  return wrap;
+}
+
+function tutilFormatDuration(secs) {
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (h > 0) return h + 'h ' + m + 'm';
+  if (m > 0) return m + 'm';
+  return Math.floor(secs) + 's';
+}
+
 function buildBar(name, percent, duration, color) {
   const pct = percent || 0;
   return el('div', { class: 'bar-row' },
@@ -817,30 +1070,54 @@ function openTodoModal(t) {
 
 function openEntryModal(e, defaultDate) {
   const isNew = !e;
-  const date = e ? e.start_time.slice(0, 10) : (defaultDate || todayStr());
-  const startField = field('开始', input('time', e ? e.start_time.slice(11, 19) : '09:00'));
-  const endField = field('结束', input('time', e && e.end_time ? e.end_time.slice(11, 19) : ''));
-  const dateField = field('日期', input('date', date));
-  const groupField = field('分组', groupSelect(e && e.group_id ? e.group_id : Number(state.currentGroup) || null));
-  const todoField = field('关联待办（可选）', todoSelect(e && e.todo_id ? e.todo_id : null));
+  const startDate = e ? e.start_time.slice(0, 10) : (defaultDate || todayStr());
+  const endDate = e && e.end_time ? e.end_time.slice(0, 10) : startDate;
+  const startTime = e ? e.start_time.slice(11, 16) : '09:00';
+  const endTime = e && e.end_time ? e.end_time.slice(11, 16) : '';
+  const initialGroupId = e && e.group_id ? e.group_id : Number(state.currentGroup) || null;
+  const initialTodoId = e && e.todo_id ? e.todo_id : null;
+
+  const startDateField = field('开始日期', input('date', startDate));
+  const startTimeField = field('开始时间', input('time', startTime));
+  const endDateField = field('结束日期', input('date', endDate));
+  const endTimeField = field('结束时间', input('time', endTime));
+
+  // Build group select
+  const gs = groupSelect(initialGroupId);
+  const todoWrapper = el('div', { class: 'field' }, el('label', {}, '关联待办（可选）'));
+  function buildTodoField(groupId) {
+    todoWrapper.querySelectorAll('select').forEach(s => s.remove());
+    todoWrapper.appendChild(todoSelect(initialTodoId, groupId));
+  }
+  buildTodoField(initialGroupId);
+  gs.addEventListener('change', function () {
+    const gid = this.value ? Number(this.value) : null;
+    buildTodoField(gid);
+  });
+
   const noteField = field('备注', input('text', e && e.note ? e.note : ''));
   const form = el('div', {});
-  form.appendChild(dateField);
-  form.appendChild(el('div', { class: 'row' }, startField, endField));
-  form.appendChild(groupField);
-  form.appendChild(todoField);
+  form.appendChild(el('div', { class: 'row' }, startDateField, startTimeField));
+  form.appendChild(el('div', { class: 'row' }, endDateField, endTimeField));
+  form.appendChild(el('div', { class: 'field' }, el('label', {}, '分组'), gs));
+  form.appendChild(todoWrapper);
   form.appendChild(noteField);
   form.appendChild(el('div', { class: 'save-row' },
     el('button', { class: 'btn btn-primary', onclick: async () => {
-      const d = dateField.querySelector('input').value;
-      const st = startField.querySelector('input').value;
-      const en = endField.querySelector('input').value;
+      const sd = startDateField.querySelector('input').value;
+      const st = startTimeField.querySelector('input').value;
+      const ed = endDateField.querySelector('input').value;
+      const en = endTimeField.querySelector('input').value;
+      const startDt = `${sd} ${st}:00`;
+      const endDt = en ? `${ed} ${en}:00` : null;
+      if (!st) { alert('请填写开始时间'); return; }
+      if (endDt && endDt <= startDt) { alert('结束时间必须晚于开始时间'); return; }
       const body = {
-        start_time: `${d} ${st}:00`,
-        end_time: en ? `${d} ${en}:00` : null,
+        start_time: startDt,
+        end_time: endDt,
         note: noteField.querySelector('input').value,
-        group_id: groupField.querySelector('select').value ? Number(groupField.querySelector('select').value) : null,
-        todo_id: todoField.querySelector('select').value ? Number(todoField.querySelector('select').value) : null,
+        group_id: gs.value ? Number(gs.value) : null,
+        todo_id: todoWrapper.querySelector('select').value ? Number(todoWrapper.querySelector('select').value) : null,
       };
       try {
         if (isNew) await api('POST', '/api/time-entries', body);
@@ -905,11 +1182,14 @@ function groupSelect(selectedId) {
   }
   return s;
 }
-function todoSelect(selectedId) {
+function todoSelect(selectedId, groupId) {
   const s = el('select', { class: 'select' });
   s.appendChild(el('option', { value: '' }, '无'));
   for (const t of state.todos) {
     if (t.status === 'done') continue;
+    if (groupId != null) {
+      if (t.group_id !== groupId && t.group_id != null) continue;
+    }
     const opt = el('option', { value: t.id }, t.title);
     if (selectedId && Number(selectedId) === t.id) opt.selected = true;
     s.appendChild(opt);

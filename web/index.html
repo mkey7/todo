@@ -13,7 +13,6 @@
     <nav class="tabs">
       <button class="tab active" data-view="today">今日</button>
       <button class="tab" data-view="todos">待办</button>
-      <button class="tab" data-view="timeline">时间轴</button>
       <button class="tab" data-view="analysis">分析</button>
     </nav>
     <div class="clock" id="clock"></div>
@@ -44,6 +43,7 @@
         <div class="bf-row">
           <input id="bf-date" type="date" class="input">
           <input id="bf-start" type="time" class="input">
+          <input id="bf-end-date" type="date" class="input">
           <input id="bf-end" type="time" class="input">
         </div>
         <div class="bf-row">
@@ -71,7 +71,13 @@
 
     <!-- ③ 时间轴 · 分析 合并 -->
     <div class="card">
-      <div class="panel-head"><h3>今日时间轴 · 分析</h3></div>
+      <div class="panel-head">
+        <h3>今日时间轴 · 分析</h3>
+        <div class="seg" id="timeline-zoom-seg">
+          <button class="seg-btn active" data-zoom="24h">全天</button>
+          <button class="seg-btn" data-zoom="12h">9-21</button>
+        </div>
+      </div>
       <div id="today-timeline-wrap"></div>
       <div id="today-analysis"></div>
     </div>
@@ -107,27 +113,8 @@
           <button class="btn btn-small btn-primary" id="add-todo-btn">＋ 新建待办</button>
         </div>
         <div id="todo-list"></div>
+        <div id="todo-analysis-panel" class="hidden"></div>
       </div>
-    </div>
-  </section>
-
-  <!-- ========== 时间轴 ========== -->
-  <section class="view hidden" id="view-timeline">
-    <div class="panel-head">
-      <input type="date" id="timeline-date" class="input">
-      <button class="btn btn-small" id="timeline-prev">前一天</button>
-      <button class="btn btn-small" id="timeline-today">今天</button>
-      <button class="btn btn-small" id="timeline-next">后一天</button>
-      <button class="btn btn-small btn-primary" id="timeline-add">＋ 补录</button>
-    </div>
-    <div class="card">
-      <h3 id="timeline-date-label"></h3>
-      <div id="timeline-host" class="timeline-host"></div>
-      <div id="timeline-legend" class="legend"></div>
-    </div>
-    <div class="card">
-      <h3>当日记录</h3>
-      <div id="timeline-entries"></div>
     </div>
   </section>
 

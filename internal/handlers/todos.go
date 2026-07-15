@@ -6,6 +6,7 @@ import (
 
 	"todo/internal/models"
 	"todo/internal/store"
+	"todo/internal/tutil"
 )
 
 func (h *Handler) ListTodos(w http.ResponseWriter, r *http.Request) {
@@ -93,4 +94,63 @@ func (h *Handler) DeleteTodo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// GET /api/todos/{id}/time-entries
+func (h *Handler) TodoTimeEntries(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	// Collect the todo itself plus all descendant IDs.
+	ids, err := store.CollectDescendantIDs(h.DB, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ids = append([]int64{id}, ids...)
+
+	es, err := store.ListEntriesForTodos(h.DB, ids)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if es == nil {
+		es = []models.TimeEntry{}
+	}
+	writeJSON(w, http.StatusOK, es)
+}
+
+// GET /api/todos/{id}/time-entries/monthly?month=YYYY-MM
+func (h *Handler) TodoTimeEntriesMonthly(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	month := strParam(r, "month")
+	if month == "" {
+		month = tutil.Today()[:7]
+	}
+	start := month + "-01 00:00:00"
+	end := tutil.ParseStorage(start).AddDate(0, 1, 0).Format(tutil.Layout)
+
+	ids, err := store.CollectDescendantIDs(h.DB, id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ids = append([]int64{id}, ids...)
+
+	es, err := store.ListEntriesForTodosInRange(h.DB, ids, start, end)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if es == nil {
+		es = []models.TimeEntry{}
+	}
+	writeJSON(w, http.StatusOK, es)
 }
