@@ -52,7 +52,9 @@ const state = {
   analysisWeek: '',
   todayMode: 'timer',      // 'timer' | 'backfill'
   todayShowDone: false,    // 任务列表是否显示已完成
-  timelineZoom: '24h',     // '24h' | '12h' (9-21)
+  timelineZoom: '12h',     // '24h' | '12h' (9-21)
+  todoFilter: 'all',       // 'all' | 'pending' | 'done'
+  todoSort: 'newest',      // 'newest' | 'oldest'
 };
 
 function groupColor(id) {
@@ -402,14 +404,61 @@ function renderTodos() {
     ul.appendChild(li);
   }
 
-  $('#todos-title').textContent = state.currentGroup ? groupName(Number(state.currentGroup)) : '全部待办';
+  // Filter & sort bar
+  const titleText = state.currentGroup ? groupName(Number(state.currentGroup)) : '全部待办';
+  $('#todos-title').innerHTML = '';
+  $('#todos-title').appendChild(document.createTextNode(titleText));
+  $('#todos-title').appendChild(buildTodoFilterBar());
+
   const list = $('#todo-list');
   list.innerHTML = '';
-  const filtered = state.currentGroup
+  let filtered = state.currentGroup
     ? state.todos.filter(t => t.group_id === Number(state.currentGroup))
     : state.todos;
+
+  // Apply status filter
+  if (state.todoFilter === 'pending') filtered = filtered.filter(t => t.status !== 'done');
+  else if (state.todoFilter === 'done') filtered = filtered.filter(t => t.status === 'done');
+
+  // Apply sort by created_at
+  filtered = [...filtered].sort((a, b) => {
+    const cmp = new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    return state.todoSort === 'newest' ? cmp : -cmp;
+  });
+
   if (filtered.length === 0) { list.appendChild(emptyHint('没有待办，点右上角新建')); return; }
   for (const t of filtered) list.appendChild(buildTodoRow(t, false));
+}
+
+function buildTodoFilterBar() {
+  const bar = el('span', { class: 'todo-filter-bar' });
+  // Filter buttons
+  const filters = [
+    { key: 'all', label: '全部' },
+    { key: 'pending', label: '待办' },
+    { key: 'done', label: '已完成' },
+  ];
+  for (const f of filters) {
+    bar.appendChild(el('button', {
+      class: 'btn btn-small filter-btn' + (state.todoFilter === f.key ? ' active' : ''),
+      onclick: (ev) => {
+        ev.stopPropagation();
+        state.todoFilter = f.key;
+        renderTodos();
+      },
+    }, f.label));
+  }
+  // Sort toggle
+  const sortLabel = state.todoSort === 'newest' ? '↓最新' : '↑最早';
+  bar.appendChild(el('button', {
+    class: 'btn btn-small sort-btn',
+    onclick: (ev) => {
+      ev.stopPropagation();
+      state.todoSort = state.todoSort === 'newest' ? 'oldest' : 'newest';
+      renderTodos();
+    },
+  }, sortLabel));
+  return bar;
 }
 
 function buildTodoRow(t, compact) {
@@ -426,7 +475,12 @@ function buildTodoRow(t, compact) {
   }, t.status === 'done' ? '✓' : '');
   row.appendChild(check);
   const main = el('div', { class: 'todo-main' });
-  main.appendChild(el('div', { class: 'todo-title' }, t.title));
+  const titleEl = el('div', { class: 'todo-title clickable' }, t.title);
+  titleEl.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    toggleInlineAnalysis(t, item);
+  });
+  main.appendChild(titleEl);
   const meta = el('div', { class: 'todo-meta' });
   if (t.group_id) meta.appendChild(el('span', { class: 'group-tag' }, el('i', { style: `background:${groupColor(t.group_id)}` }), groupName(t.group_id)));
   if (t.due_date) meta.appendChild(document.createTextNode(' · 截止 ' + t.due_date));
@@ -434,7 +488,6 @@ function buildTodoRow(t, compact) {
   row.appendChild(main);
   const actions = el('div', { class: 'todo-actions' });
   if (!compact) {
-    actions.appendChild(el('button', { class: 'btn btn-small', onclick: (ev) => { ev.stopPropagation(); openTodoAnalysis(t); } }, '分析'));
     actions.appendChild(el('button', { class: 'btn btn-small', onclick: () => openTodoModal({ parent_id: t.id }) }, '子任务'));
     actions.appendChild(el('button', { class: 'btn btn-small', onclick: () => openTodoModal(t) }, '编辑'));
     actions.appendChild(el('button', { class: 'btn btn-small btn-danger', onclick: async () => { if (confirm('删除该待办及其子任务？')) { await api('DELETE', '/api/todos/' + t.id); await loadTodos(); renderView(state.view); } } }, '删除'));
@@ -449,31 +502,41 @@ function buildTodoRow(t, compact) {
   return item;
 }
 
-// ---- Todo Analysis Panel ----
-let todoAnalysisState = { todo: null, month: '' };
+// ---- Inline Todo Analysis (below todo item) ----
+let inlineAnalysisState = { todo: null, month: '', container: null };
 
-async function openTodoAnalysis(t) {
-  const panel = $('#todo-analysis-panel');
-  panel.classList.remove('hidden');
-  panel.innerHTML = '';
+function toggleInlineAnalysis(t, todoItem) {
+  // Remove existing inline analysis if any
+  const existing = todoItem.nextElementSibling;
+  if (existing && existing.classList.contains('inline-analysis')) {
+    existing.remove();
+    return;
+  }
 
-  todoAnalysisState.todo = t;
-  if (!todoAnalysisState.month) todoAnalysisState.month = todayStr().slice(0, 7);
+  const container = el('div', { class: 'inline-analysis' });
+  todoItem.insertAdjacentElement('afterend', container);
+  renderInlineAnalysis(t, container);
+}
+
+async function renderInlineAnalysis(t, container) {
+  inlineAnalysisState.todo = t;
+  inlineAnalysisState.container = container;
+  if (!inlineAnalysisState.month) inlineAnalysisState.month = todayStr().slice(0, 7);
 
   const descCount = countDescendants(t);
 
   try {
     const [allEntries, monthEntries] = await Promise.all([
       api('GET', '/api/todos/' + t.id + '/time-entries'),
-      api('GET', '/api/todos/' + t.id + '/time-entries/monthly?month=' + todoAnalysisState.month),
+      api('GET', '/api/todos/' + t.id + '/time-entries/monthly?month=' + inlineAnalysisState.month),
     ]);
     const totalSecs = allEntries.reduce((acc, e) => acc + entryDurationSecs(e), 0);
     const totalDur = fmtDurationSecs(totalSecs);
     const monthSecs = monthEntries.reduce((acc, e) => acc + entryDurationSecs(e), 0);
 
-    panel.appendChild(el('div', { class: 'analysis-head' },
+    container.appendChild(el('div', { class: 'analysis-head' },
       el('h3', {}, '📊 ' + t.title + ' 分析'),
-      el('button', { class: 'btn btn-small', onclick: () => panel.classList.add('hidden') }, '✕ 关闭')
+      el('button', { class: 'btn btn-small', onclick: () => container.remove() }, '✕ 关闭')
     ));
 
     // Stats grid
@@ -481,31 +544,39 @@ async function openTodoAnalysis(t) {
     grid.appendChild(statCard('累计总工时', totalDur, allEntries.length + ' 条记录'));
     grid.appendChild(statCard('本月工时', fmtDurationSecs(monthSecs), monthEntries.length + ' 条记录'));
     grid.appendChild(statCard('子任务数', String(descCount), statusLabel(t.status)));
-    panel.appendChild(grid);
+    container.appendChild(grid);
 
     // Monthly heatmap with navigation
-    panel.appendChild(el('h4', {}, '月度热力图'));
-    panel.appendChild(buildHeatmapNav());
-    panel.appendChild(buildHeatmap(monthEntries, todoAnalysisState.month));
+    container.appendChild(el('h4', {}, '月度热力图'));
+    container.appendChild(buildHeatmapNav());
+    container.appendChild(buildHeatmap(monthEntries, inlineAnalysisState.month));
 
     // Legend
-    panel.appendChild(buildHeatmapLegend());
+    container.appendChild(buildHeatmapLegend());
+
+    // Show todo description
+    if (t.description && t.description.trim()) {
+      container.appendChild(el('div', { class: 'todo-desc' },
+        el('h4', {}, '描述'),
+        el('p', {}, t.description)
+      ));
+    }
 
     if (allEntries.length === 0) {
-      panel.appendChild(emptyHint('该待办暂没有时间记录'));
+      container.appendChild(emptyHint('该待办暂没有时间记录'));
       return;
     }
-    panel.appendChild(el('h4', { style: 'margin-top:16px' }, '时间记录列表'));
+    container.appendChild(el('h4', { style: 'margin-top:16px' }, '时间记录列表'));
     for (const e of monthEntries) {
-      panel.appendChild(buildEntryRow(e, () => openTodoAnalysis(t)));
+      container.appendChild(buildEntryRow(e, () => renderInlineAnalysis(t, container)));
     }
   } catch (err) {
-    panel.appendChild(emptyHint('加载失败：' + err.message));
+    container.appendChild(emptyHint('加载失败：' + err.message));
   }
 }
 
 function buildHeatmapNav() {
-  const [y, m] = todoAnalysisState.month.split('-').map(Number);
+  const [y, m] = inlineAnalysisState.month.split('-').map(Number);
   const prevM = m === 1 ? 12 : m - 1;
   const prevY = m === 1 ? y - 1 : y;
   const nextM = m === 12 ? 1 : m + 1;
@@ -515,9 +586,9 @@ function buildHeatmapNav() {
   const label = y + '年' + m + '月';
 
   return el('div', { class: 'heatmap-nav' },
-    el('button', { class: 'btn btn-small', onclick: () => { todoAnalysisState.month = prevStr; openTodoAnalysis(todoAnalysisState.todo); } }, '◀'),
+    el('button', { class: 'btn btn-small', onclick: () => { inlineAnalysisState.month = prevStr; renderInlineAnalysis(inlineAnalysisState.todo, inlineAnalysisState.container); } }, '◀'),
     el('span', { style: 'font-weight:600;margin:0 8px' }, label),
-    el('button', { class: 'btn btn-small', onclick: () => { todoAnalysisState.month = nextStr; openTodoAnalysis(todoAnalysisState.todo); } }, '▶'),
+    el('button', { class: 'btn btn-small', onclick: () => { inlineAnalysisState.month = nextStr; renderInlineAnalysis(inlineAnalysisState.todo, inlineAnalysisState.container); } }, '▶'),
   );
 }
 
@@ -639,7 +710,7 @@ function buildTimeline(entries, showNow, viewDate, zoom) {
     return wrap;
   }
   // Determine visible range
-  const z = zoom || '24h';
+  const z = zoom || '12h';
   const rangeStart = z === '12h' ? 9 : 0;
   const rangeEnd = z === '12h' ? 21 : 24;
   const rangeSecs = (rangeEnd - rangeStart) * 3600;
@@ -678,11 +749,16 @@ function buildTimeline(entries, showNow, viewDate, zoom) {
   return wrap;
 }
 function buildAxis(zoom) {
-  const z = zoom || '24h';
+  const z = zoom || '12h';
   const startH = z === '12h' ? 9 : 0;
   const endH = z === '12h' ? 21 : 24;
-  const axis = el('div', { class: 'tl-axis' });
-  for (let h = startH; h < endH; h++) axis.appendChild(el('span', {}, h % 3 === 0 ? String(h) : ''));
+  const totalSlots = endH - startH;
+  const axis = el('div', { class: 'tl-axis', style: `grid-template-columns: repeat(${totalSlots}, 1fr)` });
+  for (let h = startH; h < endH; h++) {
+    const span = el('span', {}, String(h) + ':00');
+    if (h % 3 === 0) span.classList.add('major');
+    axis.appendChild(span);
+  }
   return axis;
 }
 
@@ -813,20 +889,27 @@ function statCard(label, value, sub) {
 function renderDailyAnalysis(r) {
   const wrap = el('div', {});
   wrap.appendChild(el('div', { class: 'summary-box' }, r.summary));
-  const grid = el('div', { class: 'stat-grid' });
-  grid.appendChild(statCard('总工时', r.total_duration, r.entry_count + ' 条记录'));
-  grid.appendChild(statCard('完成任务', String(r.completed_todos), r.active_todo_count + ' 个进行中'));
-  if (r.longest_focus) grid.appendChild(statCard('最长专注', r.longest_focus.duration, r.longest_focus.entry_count + ' 条连续'));
+
+  // Stats + Pie chart side-by-side
+  const flexRow = el('div', { class: 'analysis-flex-row' });
+
+  const leftGrid = el('div', { class: 'stat-grid', style: 'flex:1' });
+  leftGrid.appendChild(statCard('总工时', r.total_duration, r.entry_count + ' 条记录'));
+  leftGrid.appendChild(statCard('完成任务', String(r.completed_todos), r.active_todo_count + ' 个进行中'));
+  if (r.longest_focus) leftGrid.appendChild(statCard('最长专注', r.longest_focus.duration, r.longest_focus.entry_count + ' 条连续'));
   if (r.vs_yesterday) {
     const d = r.vs_yesterday;
     const sign = d.delta_seconds > 0 ? '+' : '';
-    grid.appendChild(statCard('对比昨日', sign + d.duration, d.delta_percent ? (d.delta_percent > 0 ? '+' : '') + d.delta_percent.toFixed(0) + '%' : '—'));
+    leftGrid.appendChild(statCard('对比昨日', sign + d.duration, d.delta_percent ? (d.delta_percent > 0 ? '+' : '') + d.delta_percent.toFixed(0) + '%' : '—'));
   }
-  wrap.appendChild(grid);
+  flexRow.appendChild(leftGrid);
 
-  wrap.appendChild(el('div', { class: 'card', style: 'margin-top:16px' },
+  flexRow.appendChild(el('div', { class: 'card', style: 'flex:1; margin-left:16px' },
     el('h3', {}, '分组占比'),
     buildPieChart(r.group_breakdown)));
+
+  wrap.appendChild(flexRow);
+
 
   // improvement editor
   wrap.appendChild(buildImprovementEditor(r.date, r.improvement, r.notes));
@@ -873,71 +956,100 @@ function buildPieChart(groups) {
     return wrap;
   }
 
+  const meaningful = groups.filter(g => g.percent >= 0.5);
   const size = 160;
   const r = 60;
   const cx = 80, cy = 80;
-  let totalPercent = 0;
 
-  // Build SVG paths
+  // Build SVG
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('viewBox', `0 0 ${size} ${size}`);
   svg.setAttribute('class', 'pie-svg');
   svg.style.width = size + 'px';
 
-  let angle = -Math.PI / 2; // Start from top
-  for (const g of groups) {
-    if (g.percent < 0.5) continue; // Skip tiny slices
-    const sliceDeg = (g.percent / 100) * Math.PI * 2;
-    const x1 = cx + r * Math.cos(angle);
-    const y1 = cy + r * Math.sin(angle);
-    angle += sliceDeg;
-    const x2 = cx + r * Math.cos(angle);
-    const y2 = cy + r * Math.sin(angle);
-    const large = sliceDeg > Math.PI ? 1 : 0;
-    const d = `M${cx},${cy} L${x1},${y1} A${r},${r} 0 ${large} 1 ${x2},${y2} Z`;
-
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    path.setAttribute('d', d);
-    path.setAttribute('fill', g.group_color);
-    path.setAttribute('stroke', 'var(--panel)');
-    path.setAttribute('stroke-width', '2');
-    path.setAttribute('class', 'pie-slice');
+  if (meaningful.length === 1) {
+    // Single group: draw a full circle (avoids degenerate arc when only 1 data point)
+    const g = meaningful[0];
+    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    circle.setAttribute('cx', cx);
+    circle.setAttribute('cy', cy);
+    circle.setAttribute('r', r);
+    circle.setAttribute('fill', g.group_color);
+    circle.setAttribute('stroke', 'var(--panel)');
+    circle.setAttribute('stroke-width', '2');
+    circle.setAttribute('class', 'pie-slice');
     const pctLabel = g.percent.toFixed(0) + '%';
-    path.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'title')).textContent = g.group_name + ' · ' + g.duration + ' · ' + pctLabel;
-    svg.appendChild(path);
-    totalPercent += g.percent;
-  }
+    const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+    title.textContent = g.group_name + ' · ' + g.duration + ' · ' + pctLabel;
+    circle.appendChild(title);
+    svg.appendChild(circle);
 
-  // Center circle + total
-  if (totalPercent < 100) {
-    // Remaining slice
-    const remDeg = ((100 - totalPercent) / 100) * Math.PI * 2;
-    const x1 = cx + r * Math.cos(angle);
-    const y1 = cy + r * Math.sin(angle);
-    angle += remDeg;
-    const x2 = cx + r * Math.cos(angle);
-    const y2 = cy + r * Math.sin(angle);
-    const d = `M${cx},${cy} L${x1},${y1} A${r},${r} 0 0 1 ${x2},${y2} Z`;
-    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    path.setAttribute('d', d);
-    path.setAttribute('fill', 'var(--panel-2)');
-    path.setAttribute('stroke', 'var(--panel)');
-    path.setAttribute('stroke-width', '2');
-    svg.appendChild(path);
-  }
+    // Center text
+    const totalDur = tutilFormatDuration(g.seconds);
+    if (totalDur) {
+      const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      text.setAttribute('x', cx);
+      text.setAttribute('y', cy + 4);
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('class', 'pie-center-text');
+      text.textContent = totalDur;
+      svg.appendChild(text);
+    }
+  } else {
+    let totalPercent = 0;
+    let angle = -Math.PI / 2; // Start from top
+    for (const g of meaningful) {
+      const sliceDeg = (g.percent / 100) * Math.PI * 2;
+      const x1 = cx + r * Math.cos(angle);
+      const y1 = cy + r * Math.sin(angle);
+      angle += sliceDeg;
+      const x2 = cx + r * Math.cos(angle);
+      const y2 = cy + r * Math.sin(angle);
+      const large = sliceDeg > Math.PI ? 1 : 0;
+      const d = `M${cx},${cy} L${x1},${y1} A${r},${r} 0 ${large} 1 ${x2},${y2} Z`;
 
-  // Center text
-  const totalDur = groups.reduce((acc, g) => acc + g.duration.length, 0) > 0
-    ? tutilFormatDuration(groups.reduce((acc, g) => acc + g.seconds, 0))
-    : '';
-  if (totalDur) {
-    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-    text.setAttribute('x', cx);
-    text.setAttribute('y', cy + 4);
-    text.setAttribute('text-anchor', 'middle');
-    text.setAttribute('class', 'pie-center-text');
-    text.textContent = totalDur;
-    svg.appendChild(text);
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', d);
+      path.setAttribute('fill', g.group_color);
+      path.setAttribute('stroke', 'var(--panel)');
+      path.setAttribute('stroke-width', '2');
+      path.setAttribute('class', 'pie-slice');
+      const pctLabel = g.percent.toFixed(0) + '%';
+      path.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'title')).textContent = g.group_name + ' · ' + g.duration + ' · ' + pctLabel;
+      svg.appendChild(path);
+      totalPercent += g.percent;
+    }
+
+    // Remaining slice if < 100%
+    if (totalPercent < 100) {
+      const remDeg = ((100 - totalPercent) / 100) * Math.PI * 2;
+      const x1 = cx + r * Math.cos(angle);
+      const y1 = cy + r * Math.sin(angle);
+      angle += remDeg;
+      const x2 = cx + r * Math.cos(angle);
+      const y2 = cy + r * Math.sin(angle);
+      const d = `M${cx},${cy} L${x1},${y1} A${r},${r} 0 0 1 ${x2},${y2} Z`;
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', d);
+      path.setAttribute('fill', 'var(--panel-2)');
+      path.setAttribute('stroke', 'var(--panel)');
+      path.setAttribute('stroke-width', '2');
+      svg.appendChild(path);
+    }
+
+    // Center text
+    const totalDur = groups.reduce((acc, g) => acc + g.duration.length, 0) > 0
+      ? tutilFormatDuration(groups.reduce((acc, g) => acc + g.seconds, 0))
+      : '';
+    if (totalDur) {
+      const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      text.setAttribute('x', cx);
+      text.setAttribute('y', cy + 4);
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('class', 'pie-center-text');
+      text.textContent = totalDur;
+      svg.appendChild(text);
+    }
   }
 
   wrap.appendChild(svg);

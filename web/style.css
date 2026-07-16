@@ -95,10 +95,17 @@ body {
   z-index: 5; pointer-events: none;
 }
 .tl-axis {
-  display: grid; grid-template-columns: repeat(24, 1fr); margin-top: 6px;
-  color: var(--muted); font-size: 10px; text-align: center;
+  display: grid; margin-top: 8px;
+  color: var(--text); font-size: 12px; text-align: center;
+  border-top: 1px solid var(--border);
 }
-.tl-axis span { border-left: 1px solid var(--border); padding-left: 2px; }
+.tl-axis span {
+  border-left: 1px solid var(--border); padding: 4px 2px 0;
+}
+.tl-axis span.major {
+  font-weight: 600; color: var(--text);
+  border-left-width: 2px; border-left-color: var(--muted);
+}
 .tl-empty { color: var(--muted); padding: 16px 0; text-align: center; }
 .legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; font-size: 12px; color: var(--muted); }
 .legend span { display: inline-flex; align-items: center; gap: 4px; }
@@ -267,6 +274,52 @@ body {
 }
 #todo-analysis-panel h3 { margin: 0; }
 #todo-analysis-panel h4 { margin: 12px 0 6px; color: var(--muted); font-size: 13px; }
+
+/* inline analysis below todo item */
+.inline-analysis {
+  margin: 8px 0 12px 20px;
+  padding: 16px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.inline-analysis .analysis-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 12px;
+}
+.inline-analysis h3 { margin: 0; font-size: 14px; }
+.inline-analysis h4 { margin: 12px 0 6px; color: var(--muted); font-size: 13px; }
+
+/* clickable todo title */
+.todo-title.clickable { cursor: pointer; }
+.todo-title.clickable:hover { color: var(--primary); text-decoration: underline; }
+
+/* analysis flex row: stats + pie chart side-by-side */
+.analysis-flex-row {
+  display: flex; gap: 16px; align-items: flex-start; margin-top: 16px;
+}
+@media (max-width: 700px) {
+  .analysis-flex-row { flex-direction: column; }
+}
+
+/* todo filter/sort bar */
+.todo-filter-bar {
+  display: inline-flex; align-items: center; gap: 4px; margin-left: 12px;
+}
+.filter-btn, .sort-btn {
+  font-size: 12px !important; padding: 3px 8px !important;
+}
+.filter-btn.active {
+  background: var(--primary); border-color: var(--primary); color: #fff;
+}
+
+/* todo description in analysis */
+.todo-desc {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px; margin-top: 16px;
+}
+.todo-desc h4 { margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+.todo-desc p { margin: 0; color: var(--text); font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
 
 /* date label on timeline */
 .tl-date-label { font-size: 12px; color: var(--muted); margin-top: 10px; margin-bottom: 4px; }
