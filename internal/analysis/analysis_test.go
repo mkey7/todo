@@ -166,6 +166,21 @@ func TestWeeklyAnalysisTrend(t *testing.T) {
 	}
 }
 
+func TestWeeklyAnalysisUsesISOYearAtCalendarBoundary(t *testing.T) {
+	db := setupDB(t)
+
+	res, err := AnalyzeWeekly(db, "2025-W01")
+	if err != nil {
+		t.Fatalf("AnalyzeWeekly: %v", err)
+	}
+	if res.WeekStart != "2024-12-30" {
+		t.Errorf("week start = %q, want 2024-12-30", res.WeekStart)
+	}
+	if res.WeekLabel != "2025-W01" {
+		t.Errorf("week label = %q, want 2025-W01", res.WeekLabel)
+	}
+}
+
 // helpers
 func mondayOfISOWeek(year, week int) time.Time {
 	jan4 := time.Date(year, 1, 4, 0, 0, 0, 0, time.Local)

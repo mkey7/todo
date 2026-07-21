@@ -16,7 +16,7 @@ var weekdaysCN = []string{"周一", "周二", "周三", "周四", "周五", "周
 func AnalyzeWeekly(db *sql.DB, week string) (WeeklyResult, error) {
 	start, end, startDay := tutil.WeekRange(week)
 	monday := tutil.ParseStorage(startDay + " 00:00:00")
-	_, w := monday.ISOWeek()
+	isoYear, w := monday.ISOWeek()
 
 	entries, err := store.ListEntriesInRange(db, start, end)
 	if err != nil {
@@ -28,10 +28,11 @@ func AnalyzeWeekly(db *sql.DB, week string) (WeeklyResult, error) {
 	}
 
 	res := WeeklyResult{
-		WeekStart:     startDay,
-		WeekLabel:     fmt.Sprintf("%d-W%02d", monday.Year(), w),
-		EntryCount:    len(entries),
+		WeekStart:      startDay,
+		WeekLabel:      fmt.Sprintf("%d-W%02d", isoYear, w),
+		EntryCount:     len(entries),
 		CompletedTodos: completed,
+		WeeklyEntries:  entries,
 	}
 
 	// Per-day bucketing (Mon..Sun).

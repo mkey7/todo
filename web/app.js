@@ -53,6 +53,7 @@ const state = {
   todayMode: 'timer',      // 'timer' | 'backfill'
   todayShowDone: false,    // 任务列表是否显示已完成
   timelineZoom: '12h',     // '24h' | '12h' (9-21)
+  weekHourPx: 90,          // weekly vertical timeline: pixels per hour (zoom)
   todoFilter: 'all',       // 'all' | 'pending' | 'done'
   todoSort: 'newest',      // 'newest' | 'oldest'
 };
@@ -127,9 +128,14 @@ function bindToday() {
   // 计时
   $('#timer-toggle').addEventListener('click', onTimerToggle);
   $('#timer-todo').addEventListener('change', e => {
-    // 选中 todo 后自动带出其分组
-    const t = state.todos.find(x => String(x.id) === e.target.value);
+    // 选中 todo（含子任务）后自动带出其分组
+    const t = findTodoById(e.target.value);
     if (t && t.group_id) $('#timer-group').value = String(t.group_id);
+    // For sub-tasks without their own group_id, find the parent's group
+    if (t && !t.group_id && t.parent_id) {
+      const parent = findTodoById(t.parent_id);
+      if (parent && parent.group_id) $('#timer-group').value = String(parent.group_id);
+    }
   });
   // 分组选择变化时联动过滤待办列表
   $('#timer-group').addEventListener('change', () => {
@@ -200,18 +206,49 @@ function fillGroupSelect(sel, selectedId) {
 function fillTodoSelect(sel, selectedId, groupId) {
   const prev = sel.value;
   sel.innerHTML = '<option value="">无</option>';
-  for (const t of state.todos) {
-    if (t.status === 'done') continue;
-    // Filter by group if a group is selected: show only tasks from that group or ungrouped tasks
-    if (groupId != null) {
-      if (t.group_id !== groupId && t.group_id != null) continue;
+
+  // Flatten the todo tree: top-level + children recursively
+  const flatList = [];
+  function walk(todos, depth, parentGroupId) {
+    for (const t of todos) {
+      if (t.status === 'done') continue;
+      // For sub-tasks, use the parent's group_id for filtering
+      const effectiveGroupId = t.parent_id ? (parentGroupId ?? t.group_id) : t.group_id;
+      if (groupId != null) {
+        if (effectiveGroupId !== groupId && effectiveGroupId != null) continue;
+      }
+      const indent = depth > 0 ? '  '.repeat(depth) + '└ ' : '';
+      const hasKids = t.children && t.children.length;
+      const label = indent + t.title + (hasKids && depth === 0 ? ' …' : '');
+      flatList.push({ id: t.id, label, groupId: effectiveGroupId });
+      if (t.children && t.children.length) {
+        walk(t.children, depth + 1, t.group_id);
+      }
     }
-    const label = (t.children && t.children.length) ? t.title + ' …' : t.title;
-    const opt = el('option', { value: t.id }, label);
-    if (selectedId && Number(selectedId) === t.id) opt.selected = true;
+  }
+  walk(state.todos, 0, null);
+
+  for (const item of flatList) {
+    const opt = el('option', { value: item.id }, item.label);
+    if (selectedId && Number(selectedId) === item.id) opt.selected = true;
     sel.appendChild(opt);
   }
   if (prev) sel.value = prev;
+}
+
+// Find a todo anywhere in the tree by ID (including children)
+function findTodoById(id) {
+  function search(todos) {
+    for (const t of todos) {
+      if (String(t.id) === String(id)) return t;
+      if (t.children && t.children.length) {
+        const found = search(t.children);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+  return search(state.todos);
 }
 
 function renderTimer() {
@@ -701,13 +738,22 @@ async function saveGroup() {
 //  ANALYSIS
 // ============================================================
 function buildTimeline(entries, showNow, viewDate, zoom) {
-  const host = el('div', { class: 'timeline-host' });
   const wrap = el('div', {});
-  if (entries.length === 0) {
+  wrap.appendChild(buildTimelineTrack(entries, showNow, viewDate, zoom));
+  wrap.appendChild(buildAxis(zoom));
+  return wrap;
+}
+
+// buildTimelineTrack renders just the positioned block track (no axis). It is
+// shared by the single-day timeline and the 7-day parallel timeline. Each
+// block is clipped to the visible range of viewDate's day, so passing the
+// full week's entries with a per-day viewDate correctly renders only the
+// portion overlapping that day (cross-midnight entries show on both days).
+function buildTimelineTrack(entries, showNow, viewDate, zoom) {
+  const host = el('div', { class: 'timeline-host' });
+  if (!entries || entries.length === 0) {
     host.appendChild(el('div', { class: 'tl-empty', style: 'width:100%' }, '暂无记录'));
-    wrap.appendChild(host);
-    wrap.appendChild(buildAxis(zoom));
-    return wrap;
+    return host;
   }
   // Determine visible range
   const z = zoom || '12h';
@@ -744,9 +790,7 @@ function buildTimeline(entries, showNow, viewDate, zoom) {
       host.appendChild(el('div', { class: 'tl-now', style: `left:${pct}%` }));
     }
   }
-  wrap.appendChild(host);
-  wrap.appendChild(buildAxis(zoom));
-  return wrap;
+  return host;
 }
 function buildAxis(zoom) {
   const z = zoom || '12h';
@@ -794,9 +838,10 @@ function entryDuration(e) {
 //  ANALYSIS
 // ============================================================
 function bindAnalysis() {
-  $$('.seg-btn').forEach(b => b.addEventListener('click', () => {
+  const scopeButtons = $$('#view-analysis .seg-btn[data-scope]');
+  scopeButtons.forEach(b => b.addEventListener('click', () => {
     state.analysisScope = b.dataset.scope;
-    $$('.seg-btn').forEach(x => x.classList.toggle('active', x === b));
+    scopeButtons.forEach(x => x.classList.toggle('active', x === b));
     $('#analysis-date').classList.toggle('hidden', state.analysisScope !== 'daily');
     $('#analysis-week').classList.toggle('hidden', state.analysisScope !== 'weekly');
     if (state.analysisScope === 'weekly' && !state.analysisWeek) state.analysisWeek = currentISOWeek();
@@ -804,47 +849,56 @@ function bindAnalysis() {
     renderAnalysis();
   }));
   $('#analysis-date').value = state.analysisDate;
-  $('#analysis-date').addEventListener('change', e => { state.analysisDate = e.target.value; renderAnalysis(); });
-  $('#analysis-week').addEventListener('change', e => { state.analysisWeek = e.target.value; renderAnalysis(); });
+  $('#analysis-date').addEventListener('change', e => {
+    state.analysisDate = e.target.value || todayStr();
+    e.target.value = state.analysisDate;
+    renderAnalysis();
+  });
+  $('#analysis-week').addEventListener('change', e => {
+    state.analysisWeek = e.target.value || currentISOWeek();
+    e.target.value = state.analysisWeek;
+    renderAnalysis();
+  });
   $('#analysis-prev').addEventListener('click', () => shiftAnalysis(-1));
   $('#analysis-next').addEventListener('click', () => shiftAnalysis(1));
 }
 function currentISOWeek() {
   const d = new Date();
-  const tmp = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-  const dayNum = tmp.getUTCDay() || 7;
-  tmp.setUTCDate(tmp.getUTCDate() + 4 - dayNum);
-  const yearStart = new Date(Date.UTC(tmp.getUTCFullYear(), 0, 1));
-  const week = Math.ceil(((tmp - yearStart) / 86400000 + 1) / 7);
-  return tmp.getUTCFullYear() + '-W' + String(week).padStart(2, '0');
+  return isoWeekForUTCDate(new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())));
+}
+function shiftDate(date, dir) {
+  const m = (date || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return todayStr();
+  const dt = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  dt.setUTCDate(dt.getUTCDate() + dir);
+  return dt.toISOString().slice(0, 10);
 }
 function shiftAnalysis(dir) {
   if (state.analysisScope === 'daily') {
-    const dt = new Date(state.analysisDate + 'T00:00:00');
-    dt.setDate(dt.getDate() + dir);
-    state.analysisDate = dt.toISOString().slice(0, 10);
+    state.analysisDate = shiftDate(state.analysisDate, dir);
     $('#analysis-date').value = state.analysisDate;
   } else {
-    state.analysisWeek = shiftISOWeek(state.analysisWeek, dir);
+    state.analysisWeek = shiftISOWeek(state.analysisWeek || currentISOWeek(), dir);
     $('#analysis-week').value = state.analysisWeek;
   }
   renderAnalysis();
 }
 function shiftISOWeek(week, dir) {
-  const m = week.match(/^(\d{4})-W(\d{2})$/);
+  const m = (week || '').match(/^(\d{4})-W(\d{2})$/);
   if (!m) return currentISOWeek();
-  const year = Number(m[1]); const w = Number(m[2]);
-  const jan4 = new Date(year, 0, 4);
-  const wd = jan4.getDay() || 7;
-  const monday1 = new Date(jan4); monday1.setDate(jan4.getDate() - (wd - 1));
-  const monday = new Date(monday1); monday1.setDate(monday1.getDate() + (w - 1) * 7);
-  monday.setDate(monday.getDate() + dir * 7);
-  // recompute ISO week of `monday`
-  const tmp = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 3);
-  const tmpDay = tmp.getDay() || 7;
-  const yStart = new Date(tmp.getFullYear(), 0, 1);
-  const wk = Math.ceil(((tmp - yStart) / 86400000 + 1) / 7);
-  return tmp.getFullYear() + '-W' + String(wk).padStart(2, '0');
+  const jan4 = new Date(Date.UTC(Number(m[1]), 0, 4));
+  const monday = new Date(jan4);
+  monday.setUTCDate(jan4.getUTCDate() - ((jan4.getUTCDay() || 7) - 1) + (Number(m[2]) - 1) * 7 + dir * 7);
+  return isoWeekForUTCDate(monday);
+}
+function isoWeekForUTCDate(date) {
+  const tmp = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dayNum = tmp.getUTCDay() || 7;
+  tmp.setUTCDate(tmp.getUTCDate() + 4 - dayNum);
+  const year = tmp.getUTCFullYear();
+  const yearStart = new Date(Date.UTC(year, 0, 1));
+  const week = Math.ceil(((tmp - yearStart) / 86400000 + 1) / 7);
+  return year + '-W' + String(week).padStart(2, '0');
 }
 
 async function renderAnalysis() {
@@ -852,6 +906,8 @@ async function renderAnalysis() {
   host.innerHTML = '';
   try {
     if (state.analysisScope === 'daily') {
+      state.analysisDate = state.analysisDate || todayStr();
+      $('#analysis-date').value = state.analysisDate;
       const [r, entries] = await Promise.all([
         api('GET', '/api/analysis/daily?date=' + state.analysisDate),
         api('GET', '/api/time-entries?date=' + state.analysisDate),
@@ -870,6 +926,8 @@ async function renderAnalysis() {
       host.appendChild(renderDailyAnalysis(r));
     } else {
       const w = state.analysisWeek || currentISOWeek();
+      state.analysisWeek = w;
+      $('#analysis-week').value = w;
       const r = await api('GET', '/api/analysis/weekly?week=' + w);
       host.appendChild(renderWeeklyAnalysis(r));
     }
@@ -929,6 +987,23 @@ function renderWeeklyAnalysis(r) {
     grid.appendChild(statCard('对比上周', sign + d.duration, d.delta_percent ? (d.delta_percent > 0 ? '+' : '') + d.delta_percent.toFixed(0) + '%' : '—'));
   }
   wrap.appendChild(grid);
+
+  // 7-day parallel timeline: one horizontal track per weekday.
+  const tlCard = el('div', { class: 'card', style: 'margin-top:16px' });
+  tlCard.appendChild(el('div', { class: 'panel-head', style: 'justify-content:space-between' },
+    el('h3', {}, '本周时间轴 · 7天'),
+    el('div', { style: 'display:flex;gap:8px' },
+      el('div', { class: 'seg' },
+        el('button', { class: 'seg-btn' + (state.timelineZoom === '24h' ? ' active' : ''), onclick: () => { state.timelineZoom = '24h'; renderAnalysis(); } }, '全天'),
+        el('button', { class: 'seg-btn' + (state.timelineZoom === '12h' ? ' active' : ''), onclick: () => { state.timelineZoom = '12h'; renderAnalysis(); } }, '9-21'),
+      ),
+      el('div', { class: 'seg', title: '缩放时间轴' },
+        el('button', { class: 'seg-btn week-cal-zoom-out', title: '缩小', disabled: state.weekHourPx <= 32 ? true : null, onclick: () => setWeekZoom(state.weekHourPx - 16) }, '－'),
+        el('button', { class: 'seg-btn week-cal-zoom-in', title: '放大', disabled: state.weekHourPx >= 192 ? true : null, onclick: () => setWeekZoom(state.weekHourPx + 16) }, '＋'),
+      ),
+    )));
+  tlCard.appendChild(buildWeekTimeline(r.daily_trend, r.weekly_entries, state.timelineZoom));
+  wrap.appendChild(tlCard);
 
   wrap.appendChild(el('div', { class: 'card', style: 'margin-top:16px' },
     el('h3', {}, '每日趋势'),
@@ -1108,6 +1183,98 @@ function buildTrendChart(days) {
   wrap.appendChild(chart);
   wrap.appendChild(labels);
   return wrap;
+}
+
+// buildWeekTimeline renders the 7 days of a week as a vertical, scrollable
+// calendar grid: the hour axis runs top→bottom in a left gutter, each weekday
+// is a column, and work blocks are positioned vertically by their start/end
+// time (clipped per day, so cross-midnight entries show on both days).
+//
+// Hour height is driven by the CSS custom property --hour-px (set on the root
+// from state.weekHourPx), so zooming is a live CSS-var change — no re-render,
+// no scroll jump. Wheel scrolling is native (overflow-y: auto).
+function buildWeekTimeline(trend, entries, zoom) {
+  const z = zoom || '12h';
+  const rangeStart = z === '12h' ? 9 : 0;
+  const rangeEnd = z === '12h' ? 21 : 24;
+  const totalHours = rangeEnd - rangeStart;
+  const today = todayStr();
+  const hasEntries = entries && entries.length > 0;
+
+  // Fixed day-header row (stays put while the grid scrolls).
+  const head = el('div', { class: 'week-cal-head' });
+  head.appendChild(el('div', { class: 'week-cal-head-spacer' }));
+  for (const d of trend) {
+    const isToday = d.date === today;
+    head.appendChild(el('div', { class: 'week-cal-col-head' + (isToday ? ' is-today' : '') },
+      el('span', { class: 'week-cal-wd' }, d.weekday),
+      el('span', { class: 'week-cal-date' }, d.date.slice(5)),
+      el('span', { class: 'week-cal-dur' }, d.seconds > 0 ? d.duration : '')));
+  }
+
+  // Scrollable grid: hour gutter + 7 day columns.
+  const scroll = el('div', { class: 'week-cal-scroll' });
+  const inner = el('div', { class: 'week-cal-inner' });
+
+  const gutter = el('div', { class: 'week-cal-gutter' });
+  for (let h = rangeStart; h < rangeEnd; h++) {
+    gutter.appendChild(el('div', { class: 'week-cal-hour', style: `--hh:${h - rangeStart}` },
+      String(h).padStart(2, '0') + ':00'));
+  }
+  inner.appendChild(gutter);
+
+  for (const d of trend) {
+    const isToday = d.date === today;
+    const col = el('div', { class: 'week-cal-col' + (isToday ? ' is-today' : '') });
+    const dayStart = new Date(d.date + 'T00:00:00').getTime();
+    const rangeStartMs = dayStart + rangeStart * 3600 * 1000;
+    const rangeEndMs = dayStart + rangeEnd * 3600 * 1000;
+    if (hasEntries) {
+      for (const e of entries) {
+        const start = new Date(e.start_time.replace(' ', 'T')).getTime();
+        const endSecs = e.end_time ? new Date(e.end_time.replace(' ', 'T')).getTime() : Date.now();
+        const s = Math.max(start, rangeStartMs);
+        const en = Math.min(endSecs, rangeEndMs);
+        if (en <= s) continue;
+        const topH = (s - rangeStartMs) / 3600000;
+        const heightH = (en - s) / 3600000;
+        const block = el('div', {
+          class: 'week-cal-block',
+          style: `--top-h:${topH.toFixed(3)};--h-h:${heightH.toFixed(3)};background:${groupColor(e.group_id)}`,
+          title: `${fmtTime(e.start_time)} - ${e.end_time ? fmtTime(e.end_time) : '进行中'} · ${groupName(e.group_id)}${e.todo_title ? ' · ' + e.todo_title : ''}`,
+        });
+        block.textContent = groupName(e.group_id);
+        block.addEventListener('click', () => openEntryModal(e));
+        col.appendChild(block);
+      }
+    }
+    if (isToday) {
+      const now = Date.now();
+      if (now >= rangeStartMs && now <= rangeEndMs) {
+        const nowH = (now - rangeStartMs) / 3600000;
+        col.appendChild(el('div', { class: 'week-cal-now', style: `--top-h:${nowH.toFixed(3)}` }));
+      }
+    }
+    inner.appendChild(col);
+  }
+  scroll.appendChild(inner);
+
+  const wrap = el('div', { class: 'week-cal', style: `--hour-px:${state.weekHourPx}px;--hours:${totalHours}` });
+  wrap.appendChild(head);
+  wrap.appendChild(scroll);
+  return wrap;
+}
+
+// setWeekZoom changes the weekly timeline's hour height live (CSS variable),
+// so the grid scales instantly without re-rendering or losing scroll position.
+function setWeekZoom(px) {
+  state.weekHourPx = Math.max(32, Math.min(192, Math.round(px)));
+  const cal = document.querySelector('#analysis-content .week-cal');
+  if (cal) cal.style.setProperty('--hour-px', state.weekHourPx + 'px');
+  const inBtn = document.querySelector('#analysis-content .week-cal-zoom-in');
+  const outBtn = document.querySelector('#analysis-content .week-cal-zoom-out');
+  if (inBtn) inBtn.disabled = state.weekHourPx >= 192;
+  if (outBtn) outBtn.disabled = state.weekHourPx <= 32;
 }
 
 function buildImprovementEditor(date, improvement, notes) {
@@ -1297,13 +1464,27 @@ function groupSelect(selectedId) {
 function todoSelect(selectedId, groupId) {
   const s = el('select', { class: 'select' });
   s.appendChild(el('option', { value: '' }, '无'));
-  for (const t of state.todos) {
-    if (t.status === 'done') continue;
-    if (groupId != null) {
-      if (t.group_id !== groupId && t.group_id != null) continue;
+  // Flatten the todo tree so sub-tasks are selectable (indented under their
+  // parent). Sub-tasks inherit the parent's group for filtering.
+  const flatList = [];
+  function walk(todos, depth, parentGroupId) {
+    for (const t of todos) {
+      if (t.status === 'done') continue;
+      const effectiveGroupId = t.parent_id ? (parentGroupId ?? t.group_id) : t.group_id;
+      if (groupId != null) {
+        if (effectiveGroupId !== groupId && effectiveGroupId != null) continue;
+      }
+      const indent = depth > 0 ? '  '.repeat(depth) + '└ ' : '';
+      flatList.push({ id: t.id, label: indent + t.title });
+      if (t.children && t.children.length) {
+        walk(t.children, depth + 1, t.group_id);
+      }
     }
-    const opt = el('option', { value: t.id }, t.title);
-    if (selectedId && Number(selectedId) === t.id) opt.selected = true;
+  }
+  walk(state.todos, 0, null);
+  for (const item of flatList) {
+    const opt = el('option', { value: item.id }, item.label);
+    if (selectedId && Number(selectedId) === item.id) opt.selected = true;
     s.appendChild(opt);
   }
   return s;

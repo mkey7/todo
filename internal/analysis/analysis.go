@@ -71,6 +71,11 @@ type WeeklyResult struct {
 	CompletedTodos   int          `json:"completed_todos"`
 	GroupBreakdown   []GroupStat  `json:"group_breakdown"`
 	DailyTrend       []DayStat    `json:"daily_trend"`
+	// WeeklyEntries is the flat list of the week's time entries, used by the
+	// frontend to render the 7-day parallel timeline. Each per-day timeline
+	// clips these entries to its own day, so cross-midnight entries render
+	// correctly on both days.
+	WeeklyEntries    []models.TimeEntry `json:"weekly_entries,omitempty"`
 	BestDay          *DayStat     `json:"best_day"`
 	SlowestDay       *DayStat     `json:"slowest_day"`
 	VsLastWeek       *WeekCompare `json:"vs_last_week,omitempty"`
