@@ -370,41 +370,89 @@ async function renderTodayEntries() {
 
 // 任务与分组：分组 chips + 按分组展示任务
 function renderTodayTasks() {
-  // 分组 chips
+  $('#today-show-done').checked = state.todayShowDone;
+
+  const filterTree = (todos) => todos.flatMap(t => {
+    const children = filterTree(t.children || []);
+    if (!state.todayShowDone && t.status === 'done' && children.length === 0) return [];
+    return [{ ...t, children }];
+  });
+  const countTree = (todos) => {
+    const counts = { pending: 0, done: 0 };
+    const walk = (items) => {
+      for (const t of items) {
+        counts[t.status === 'done' ? 'done' : 'pending'] += 1;
+        walk(t.children || []);
+      }
+    };
+    walk(todos);
+    return counts;
+  };
+
+  const buckets = state.groups.map(group => ({
+    id: group.id,
+    name: group.name,
+    color: group.color,
+    source: state.todos.filter(t => t.group_id === group.id),
+  }));
+  buckets.push({
+    id: null,
+    name: '未分组',
+    color: '#9ca3af',
+    source: state.todos.filter(t => !t.group_id),
+  });
+
+  const startGroupTimer = (groupId) => {
+    setTodayMode('timer');
+    $('#timer-group').value = groupId == null ? '' : String(groupId);
+    fillTodoSelect($('#timer-todo'), null, groupId == null ? '' : groupId);
+    $('#timer-todo').value = '';
+    $('#timer-note').focus();
+  };
+
   const chips = $('#today-groups');
   chips.innerHTML = '';
-  for (const g of state.groups) {
-    chips.appendChild(el('div', {
+  for (const bucket of buckets.filter(b => b.id != null)) {
+    const counts = countTree(bucket.source);
+    chips.appendChild(el('button', {
       class: 'group-chip',
-      title: '点击用此分组开始计时',
-      onclick: () => {
-        setTodayMode('timer');
-        $('#timer-group').value = String(g.id);
-        $('#timer-todo').value = '';
-        $('#timer-note').focus();
-      },
-    }, el('i', { style: `background:${g.color}` }), g.name));
+      type: 'button',
+      title: `切换到“${bucket.name}”分组计时`,
+      onclick: () => startGroupTimer(bucket.id),
+    },
+    el('i', { style: `background:${bucket.color}` }),
+    el('span', {}, bucket.name),
+    el('span', { class: 'group-chip-count' }, String(counts.pending))));
   }
 
-  // 按分组展示任务
   const host = $('#today-tasks');
   host.innerHTML = '';
-  const visible = state.todos.filter(t => state.todayShowDone ? true : t.status !== 'done');
-  if (visible.length === 0) { host.appendChild(emptyHint('暂无任务，点右上角新建')); return; }
+  const visibleBuckets = buckets
+    .map(bucket => ({ ...bucket, items: filterTree(bucket.source) }))
+    .filter(bucket => bucket.items.length > 0);
 
-  const renderSection = (titleNode, items) => {
-    if (items.length === 0) return;
-    host.appendChild(titleNode);
-    for (const t of items) host.appendChild(buildTodoRow(t, false));
-  };
-  for (const g of state.groups) {
-    const items = visible.filter(t => t.group_id === g.id);
-    if (items.length === 0) continue;
-    renderSection(el('div', { class: 'task-group-head' }, el('i', { style: `background:${g.color}` }), g.name), items);
+  if (visibleBuckets.length === 0) {
+    host.appendChild(emptyHint(state.todayShowDone ? '暂无任务，点右上角新建' : '今天的任务已全部完成'));
+    return;
   }
-  const ungrouped = visible.filter(t => !t.group_id);
-  if (ungrouped.length) {
-    renderSection(el('div', { class: 'task-group-head' }, el('i', { style: 'background:#9ca3af' }), '未分组'), ungrouped);
+
+  for (const bucket of visibleBuckets) {
+    const counts = countTree(bucket.source);
+    const card = el('section', { class: 'today-task-group' });
+    const head = el('div', { class: 'task-group-head' },
+      el('i', { style: `background:${bucket.color}` }),
+      el('strong', {}, bucket.name),
+      el('span', { class: 'task-group-count' }, `${counts.pending} 待办${counts.done ? ` · ${counts.done} 完成` : ''}`),
+      el('button', {
+        class: 'btn btn-small task-group-timer',
+        type: 'button',
+        onclick: () => startGroupTimer(bucket.id),
+      }, '计时'));
+    card.appendChild(head);
+    const list = el('div', { class: 'today-task-list' });
+    for (const t of bucket.items) list.appendChild(buildTodoRow(t, false));
+    card.appendChild(list);
+    host.appendChild(card);
   }
 }
 

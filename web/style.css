@@ -252,25 +252,50 @@ body {
 .bf-row .input, .bf-row .select { flex: 1 1 120px; min-width: 110px; }
 .backfill-body > .btn-primary { align-self: flex-start; }
 
-/* 今日：分组 chips */
-.group-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+/* 今日：分组概览 */
+.group-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
 .group-chip {
   display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
   background: var(--panel-2); border: 1px solid var(--border);
-  padding: 5px 10px; border-radius: 999px; font-size: 13px; color: var(--muted);
+  padding: 5px 7px 5px 10px; border-radius: 999px; font-size: 13px; color: var(--muted);
 }
 .group-chip:hover { color: var(--text); border-color: var(--primary); }
 .group-chip i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.group-chip-count {
+  min-width: 20px; padding: 0 6px; border-radius: 999px; text-align: center;
+  background: var(--border); color: var(--text); font-size: 11px; line-height: 20px;
+}
 
-/* 今日：任务分组小标题 */
-.task-group-head { display: flex; align-items: center; gap: 6px; color: var(--muted);
-  font-size: 13px; margin: 14px 0 6px; }
+/* 今日：任务分组 */
+#today-tasks { display: grid; gap: 12px; }
+.today-task-group {
+  overflow: hidden; border: 1px solid var(--border); border-radius: 10px;
+  background: rgba(15, 23, 42, 0.18);
+}
+.task-group-head {
+  display: flex; align-items: center; gap: 7px; color: var(--muted);
+  min-height: 42px; padding: 8px 10px; font-size: 13px; border-bottom: 1px solid var(--border);
+}
 .task-group-head i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.task-group-head strong { color: var(--text); font-size: 14px; }
+.task-group-count { font-size: 12px; }
+.task-group-timer { margin-left: auto; }
+.today-task-list { padding: 8px; }
+.today-task-list > .todo-item:last-child { margin-bottom: 0; }
 
 /* 今日：显示已完成 复选 */
-.today-show-done { margin-left: auto; display: inline-flex; align-items: center; gap: 5px;
-  font-size: 12px; color: var(--muted); cursor: pointer; }
+.today-show-done {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--muted); cursor: pointer;
+}
 .today-show-done input { accent-color: var(--primary); cursor: pointer; }
+
+@media (max-width: 620px) {
+  #view-today .panel-head { flex-wrap: wrap; }
+  #view-today .panel-head h3 { flex: 1 0 100%; }
+  .today-show-done { margin-left: 0; }
+  .todo-actions { flex-wrap: wrap; justify-content: flex-end; }
+}
 
 /* modal */
 .modal {
