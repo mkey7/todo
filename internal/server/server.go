@@ -11,8 +11,8 @@ import (
 
 // Server is the HTTP server serving both the API and the embedded frontend.
 type Server struct {
-	db     *sql.DB
-	webFS  fs.FS
+	db    *sql.DB
+	webFS fs.FS
 }
 
 // New creates a Server. webFS should be the (sub)filesystem containing the
@@ -34,6 +34,12 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /api/groups", h.CreateGroup)
 	mux.HandleFunc("PUT /api/groups/{id}", h.UpdateGroup)
 	mux.HandleFunc("DELETE /api/groups/{id}", h.DeleteGroup)
+	// Tags are the current public vocabulary. Keep /groups routes for clients
+	// created before the grouping-to-tag migration.
+	mux.HandleFunc("GET /api/tags", h.ListGroups)
+	mux.HandleFunc("POST /api/tags", h.CreateGroup)
+	mux.HandleFunc("PUT /api/tags/{id}", h.UpdateGroup)
+	mux.HandleFunc("DELETE /api/tags/{id}", h.DeleteGroup)
 
 	mux.HandleFunc("GET /api/todos", h.ListTodos)
 	mux.HandleFunc("POST /api/todos", h.CreateTodo)
@@ -53,6 +59,8 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("GET /api/summaries/daily", h.GetDailySummary)
 	mux.HandleFunc("PUT /api/summaries/daily", h.PutDailySummary)
+	mux.HandleFunc("GET /api/summaries/weekly", h.GetWeeklySummary)
+	mux.HandleFunc("PUT /api/summaries/weekly", h.PutWeeklySummary)
 
 	mux.HandleFunc("GET /api/analysis/daily", h.DailyAnalysis)
 	mux.HandleFunc("GET /api/analysis/weekly", h.WeeklyAnalysis)

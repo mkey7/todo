@@ -18,12 +18,13 @@ func setupDB(t *testing.T) *sql.DB {
 		t.Fatalf("open db: %v", err)
 	}
 	schema := `
-	CREATE TABLE groups (id INTEGER PRIMARY KEY, name TEXT, color TEXT, sort_order INTEGER, created_at TEXT);
+	CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT, color TEXT, include_in_stats INTEGER NOT NULL DEFAULT 1, created_at TEXT);
+	CREATE TABLE todo_tags (todo_id INTEGER, tag_id INTEGER, tag_order INTEGER);
 	CREATE TABLE todos (id INTEGER PRIMARY KEY, group_id INTEGER, parent_id INTEGER, title TEXT, description TEXT,
 		status TEXT, priority INTEGER, due_date TEXT, created_at TEXT, completed_at TEXT);
-	CREATE TABLE time_entries (id INTEGER PRIMARY KEY, todo_id INTEGER, group_id INTEGER,
+	CREATE TABLE time_entries (id INTEGER PRIMARY KEY, todo_id INTEGER, tag_id INTEGER,
 		start_time TEXT, end_time TEXT, note TEXT, created_at TEXT);
-	CREATE TABLE daily_summaries (id INTEGER PRIMARY KEY, date TEXT UNIQUE, improvement TEXT, notes TEXT, updated_at TEXT);
+	CREATE TABLE daily_summaries (id INTEGER PRIMARY KEY, date TEXT UNIQUE, content TEXT, updated_at TEXT);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatalf("schema: %v", err)
@@ -49,7 +50,7 @@ func insertEntry(t *testing.T, db *sql.DB, groupID int, start, end string) {
 	if end != "" {
 		endArg = end
 	}
-	if _, err := db.Exec(`INSERT INTO time_entries (group_id, start_time, end_time) VALUES (?, ?, ?)`,
+	if _, err := db.Exec(`INSERT INTO time_entries (tag_id, start_time, end_time) VALUES (?, ?, ?)`,
 		groupID, start, endArg); err != nil {
 		t.Fatalf("insert entry: %v", err)
 	}
@@ -58,7 +59,7 @@ func insertEntry(t *testing.T, db *sql.DB, groupID int, start, end string) {
 func TestDailyAnalysisTotalsAndGroups(t *testing.T) {
 	db := setupDB(t)
 	// two groups
-	db.Exec(`INSERT INTO groups (id, name, color) VALUES (1, '开发', '#6366f1'), (2, '学习', '#22c55e')`)
+	db.Exec(`INSERT INTO tags (id, name, color) VALUES (1, '开发', '#6366f1'), (2, '学习', '#22c55e')`)
 
 	today := time.Now().Format("2006-01-02")
 	// 09:00-10:00 dev (3600s), 14:00-15:30 study (5400s)
@@ -98,7 +99,7 @@ func TestDailyAnalysisTotalsAndGroups(t *testing.T) {
 
 func TestDailyAnalysisPartOfDay(t *testing.T) {
 	db := setupDB(t)
-	db.Exec(`INSERT INTO groups (id, name, color) VALUES (1, '开发', '#6366f1')`)
+	db.Exec(`INSERT INTO tags (id, name, color) VALUES (1, '开发', '#6366f1')`)
 	today := time.Now().Format("2006-01-02")
 	// 10:00-13:00 spans 上午 (10-12) and 下午 (12-13)
 	insertEntry(t, db, 1, today+" 10:00:00", today+" 13:00:00")
@@ -122,7 +123,7 @@ func TestDailyAnalysisPartOfDay(t *testing.T) {
 
 func TestDailyAnalysisActiveEntryCountsAsNow(t *testing.T) {
 	db := setupDB(t)
-	db.Exec(`INSERT INTO groups (id, name, color) VALUES (1, '开发', '#6366f1')`)
+	db.Exec(`INSERT INTO tags (id, name, color) VALUES (1, '开发', '#6366f1')`)
 	today := time.Now().Format("2006-01-02")
 	// An entry started 1 hour ago with no end_time should count ~3600s.
 	start := time.Now().Add(-1 * time.Hour).Format("2006-01-02 15:04:05")
@@ -139,15 +140,15 @@ func TestDailyAnalysisActiveEntryCountsAsNow(t *testing.T) {
 
 func TestWeeklyAnalysisTrend(t *testing.T) {
 	db := setupDB(t)
-	db.Exec(`INSERT INTO groups (id, name, color) VALUES (1, '开发', '#6366f1')`)
+	db.Exec(`INSERT INTO tags (id, name, color) VALUES (1, '开发', '#6366f1')`)
 
 	// Build entries for the current ISO week: 1h on Monday, 2h on Wednesday.
 	year, week := time.Now().ISOWeek()
 	monday := mondayOfISOWeek(year, week)
-	db.Exec(`INSERT INTO time_entries (group_id, start_time, end_time) VALUES (1, ?, ?)`,
+	db.Exec(`INSERT INTO time_entries (tag_id, start_time, end_time) VALUES (1, ?, ?)`,
 		ts(monday.Add(9*time.Hour)), ts(monday.Add(10*time.Hour)))
 	wed := monday.AddDate(0, 0, 2)
-	db.Exec(`INSERT INTO time_entries (group_id, start_time, end_time) VALUES (1, ?, ?)`,
+	db.Exec(`INSERT INTO time_entries (tag_id, start_time, end_time) VALUES (1, ?, ?)`,
 		ts(wed.Add(9*time.Hour)), ts(wed.Add(11*time.Hour)))
 
 	weekLabel := formatISOWeek(monday)
@@ -188,7 +189,7 @@ func mondayOfISOWeek(year, week int) time.Time {
 	if wd == 0 {
 		wd = 7
 	}
-	mondayWeek1 := jan4.AddDate(0, 0, -(wd-1))
+	mondayWeek1 := jan4.AddDate(0, 0, -(wd - 1))
 	return mondayWeek1.AddDate(0, 0, (week-1)*7)
 }
 func formatISOWeek(t time.Time) string {

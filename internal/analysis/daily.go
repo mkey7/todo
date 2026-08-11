@@ -35,8 +35,7 @@ func AnalyzeDaily(db *sql.DB, date string) (DailyResult, error) {
 		EntryCount:      len(entries),
 		CompletedTodos:  completed,
 		ActiveTodoCount: active,
-		Improvement:     summary.Improvement,
-		Notes:           summary.Notes,
+		Content:         summary.Content,
 	}
 
 	for _, e := range entries {
@@ -44,7 +43,11 @@ func AnalyzeDaily(db *sql.DB, date string) (DailyResult, error) {
 	}
 	res.TotalDuration = tutil.FormatDuration(res.TotalSeconds)
 
-	res.GroupBreakdown = buildGroupBreakdown(entries, res.TotalSeconds)
+	res.GroupBreakdown, err = buildGroupBreakdown(db, entries, res.TotalSeconds)
+	if err != nil {
+		return DailyResult{}, err
+	}
+	res.TodoBreakdown = buildTodoBreakdown(entries, res.TotalSeconds)
 	res.PartOfDay = buildPartOfDay(entries, res.TotalSeconds)
 	res.HourlyHistogram = buildHourHistogram(entries)
 	res.LongestFocus = findLongestFocus(entries)
@@ -72,8 +75,47 @@ func AnalyzeDaily(db *sql.DB, date string) (DailyResult, error) {
 	return res, nil
 }
 
-func buildGroupBreakdown(entries []models.TimeEntry, total float64) []GroupStat {
-	groups := collectGroups(entries)
+func buildTodoBreakdown(entries []models.TimeEntry, total float64) []TodoStat {
+	byID := map[int64]*TodoStat{}
+	var order []int64
+	for _, e := range entries {
+		id, name, color := int64(0), "未关联任务", "#9ca3af"
+		if e.TodoID != nil {
+			id = *e.TodoID
+			name = e.TodoTitle
+			if name == "" {
+				name = "未命名任务"
+			}
+			// Stable, readable colors for task slices without adding a new column.
+			colors := []string{"#6366f1", "#22c55e", "#f59e0b", "#ec4899", "#06b6d4", "#8b5cf6"}
+			color = colors[int(id)%len(colors)]
+		}
+		if st, ok := byID[id]; ok {
+			st.Seconds += entrySeconds(e)
+		} else {
+			byID[id] = &TodoStat{TodoID: id, TodoName: name, TodoColor: color, Seconds: entrySeconds(e)}
+			order = append(order, id)
+		}
+	}
+	out := make([]TodoStat, 0, len(order))
+	for _, id := range order {
+		out = append(out, *byID[id])
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Seconds > out[j].Seconds })
+	for i := range out {
+		out[i].Duration = tutil.FormatDuration(out[i].Seconds)
+		if total > 0 {
+			out[i].Percent = out[i].Seconds / total * 100
+		}
+	}
+	return out
+}
+
+func buildGroupBreakdown(db *sql.DB, entries []models.TimeEntry, total float64) ([]GroupStat, error) {
+	groups, err := collectGroups(db, entries)
+	if err != nil {
+		return nil, err
+	}
 	sort.SliceStable(groups, func(i, j int) bool { return groups[i].Seconds > groups[j].Seconds })
 	for i := range groups {
 		groups[i].Duration = tutil.FormatDuration(groups[i].Seconds)
@@ -81,7 +123,7 @@ func buildGroupBreakdown(entries []models.TimeEntry, total float64) []GroupStat 
 			groups[i].Percent = (groups[i].Seconds / total) * 100
 		}
 	}
-	return groups
+	return groups, nil
 }
 
 func buildPartOfDay(entries []models.TimeEntry, total float64) []PartOfDayStat {
@@ -199,7 +241,7 @@ func dailySummaryText(r DailyResult) string {
 	}
 	if len(r.GroupBreakdown) > 0 {
 		g := r.GroupBreakdown[0]
-		parts = append(parts, fmt.Sprintf("主要投入在「%s」(%.0f%%)。", g.GroupName, g.Percent))
+		parts = append(parts, fmt.Sprintf("主要投入在标签「%s」(%.0f%%)。", g.GroupName, g.Percent))
 	}
 	if r.LongestFocus != nil && r.LongestFocus.Seconds >= 60 {
 		parts = append(parts, fmt.Sprintf("最长连续专注 %s。", r.LongestFocus.Duration))

@@ -3,39 +3,57 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>工时管理 · Todo & Timeline</title>
+<title>Todo & Timeline</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <div id="app">
   <header class="topbar">
-    <div class="brand">⏱ 工时管理</div>
+    <div class="brand">⏱ 时间管理</div>
     <nav class="tabs">
       <button class="tab active" data-view="today">今日</button>
       <button class="tab" data-view="todos">待办</button>
       <button class="tab" data-view="analysis">分析</button>
+      <button class="tab" data-view="settings">设置</button>
     </nav>
-    <div class="clock" id="clock"></div>
+    <div class="top-kpis" aria-label="今日核心指标">
+      <span><b id="kpi-date">--</b> 日期</span>
+      <span><b id="kpi-hours">--</b> 工作时长</span>
+    </div>
+    <div id="nav-active-timer" class="nav-active-timer hidden" aria-live="polite">
+      <span class="nav-active-timer-title" id="nav-active-timer-title"></span>
+      <b id="nav-active-timer-elapsed">00:00:00</b>
+      <button id="nav-active-timer-stop" class="btn btn-small btn-danger">结束</button>
+    </div>
   </header>
 
   <!-- ========== 今日 ========== -->
   <section class="view" id="view-today">
-    <!-- ① 时间记录：计时 / 补录 双模 -->
-    <div class="timer-card">
+    <div class="today-dashboard">
+      <aside class="today-sidebar left-sidebar">
+        <div class="card"><h3>今日概览</h3><div id="today-overview"></div></div>
+      </aside>
+
+      <main class="today-main">
+        <!-- ① 时间记录：计时 / 补录 双模 -->
+        <div class="timer-card">
       <div class="timer-top">
         <div class="seg" id="today-mode-seg">
           <button class="seg-btn active" data-mode="timer">计时</button>
           <button class="seg-btn" data-mode="backfill">补录</button>
         </div>
-        <div class="timer-elapsed" id="timer-elapsed">--:--:--</div>
+        <div class="timer-status">
+          <div class="timer-active-info" id="timer-active-info"></div>
+          <div class="timer-elapsed" id="timer-elapsed">--:--:--</div>
+          <button id="timer-toggle" class="btn btn-primary">开始计时</button>
+        </div>
       </div>
 
       <!-- 计时模式 -->
       <div id="today-timer-body" class="timer-body">
-        <select id="timer-group" class="select"></select>
-        <select id="timer-todo" class="select"></select>
+        <select id="timer-group" class="select" aria-label="按标签筛选任务"></select>
+        <select id="timer-todo" class="select" aria-label="选择任务"></select>
         <input id="timer-note" class="input" placeholder="备注（可选）">
-        <button id="timer-toggle" class="btn btn-primary">开始</button>
       </div>
 
       <!-- 补录模式 -->
@@ -47,46 +65,44 @@
           <input id="bf-end" type="time" class="input">
         </div>
         <div class="bf-row">
-          <select id="bf-group" class="select"></select>
-          <select id="bf-todo" class="select"></select>
+          <select id="bf-group" class="select" aria-label="按标签筛选任务"></select>
+          <select id="bf-todo" class="select" aria-label="选择任务"></select>
         </div>
-        <input id="bf-note" class="input" placeholder="备注（可选）">
-        <button id="bf-add" class="btn btn-primary">添加记录</button>
-      </div>
-
-      <div id="timer-active-info" class="timer-active-info"></div>
-    </div>
-
-    <!-- ② 任务与分组：展示 + 创建 -->
-    <div class="card">
-      <div class="panel-head">
-        <h3>今日任务</h3>
-        <button class="btn btn-small" id="today-add-group">＋ 分组</button>
-        <button class="btn btn-small btn-primary" id="today-add-todo">＋ 任务</button>
-        <label class="today-show-done"><input type="checkbox" id="today-show-done"> 显示已完成（含子任务）</label>
-      </div>
-      <div id="today-groups" class="group-chips"></div>
-      <div id="today-tasks"></div>
-    </div>
-
-    <!-- ③ 时间轴 · 分析 合并 -->
-    <div class="card">
-      <div class="panel-head">
-        <h3>今日时间轴 · 分析</h3>
-        <div class="seg" id="timeline-zoom-seg">
-          <button class="seg-btn" data-zoom="24h">全天</button>
-          <button class="seg-btn active" data-zoom="12h">9-21</button>
+        <div class="bf-note-row">
+          <input id="bf-note" class="input" placeholder="备注（可选）">
+          <button id="bf-add" class="btn btn-primary">添加记录</button>
         </div>
       </div>
-      <div id="today-timeline-wrap"></div>
-      <div id="today-analysis"></div>
-    </div>
+      </div>
 
-    <!-- ④ 今日记录 -->
-    <div class="card">
-      <h3>今日记录</h3>
-      <div id="today-entries"></div>
+        <!-- ② 任务与标签：展示 + 创建 -->
+        <div class="card today-tasks-card">
+          <div class="panel-head">
+            <h3>任务看板</h3>
+            <select id="today-task-filter" class="select" aria-label="按标签筛选任务"></select>
+            <button class="btn btn-small" id="today-add-group">＋ 标签</button>
+            <button class="btn btn-small btn-primary" id="today-add-todo">＋ 任务</button>
+          </div>
+          <div id="today-tasks"></div>
+        </div>
+      </main>
+
     </div>
+    <div class="today-bottom-grid">
+      <div class="card">
+        <div class="panel-head">
+          <h3>时间轴分析</h3>
+          <div class="seg" id="timeline-zoom-seg">
+            <button class="seg-btn" data-zoom="24h">全天</button>
+            <button class="seg-btn active" data-zoom="12h">工作时段</button>
+          </div>
+        </div>
+        <div id="today-timeline-wrap"></div>
+        <div id="today-analysis"></div>
+      </div>
+      <div class="card"><h3>今日记录</h3><div id="today-entries"></div></div>
+    </div>
+    <button id="today-quick-add" class="today-quick-add" aria-label="新建任务">＋</button>
   </section>
 
   <!-- ========== 待办 ========== -->
@@ -94,14 +110,14 @@
     <div class="todos-layout">
       <aside class="groups-panel">
         <div class="panel-head">
-          <h3>分组</h3>
+          <h3>标签</h3>
           <button class="btn btn-small" id="add-group-btn">＋</button>
         </div>
         <ul id="group-list" class="group-list">
           <li class="group-item active" data-group="">全部</li>
         </ul>
         <div id="group-editor" class="group-editor hidden">
-          <input id="group-name" class="input" placeholder="分组名">
+          <input id="group-name" class="input" placeholder="标签名">
           <input id="group-color" type="color" value="#6b7280" class="color-input">
           <button class="btn btn-small btn-primary" id="save-group-btn">保存</button>
           <button class="btn btn-small" id="cancel-group-btn">取消</button>
@@ -112,6 +128,7 @@
           <h3 id="todos-title">全部待办</h3>
           <button class="btn btn-small btn-primary" id="add-todo-btn">＋ 新建待办</button>
         </div>
+        <div id="todo-tag-filter"></div>
         <div id="todo-list"></div>
       </div>
     </div>
@@ -131,7 +148,12 @@
     </div>
     <div id="analysis-content"></div>
   </section>
+
+  <section class="view hidden" id="view-settings">
+    <div class="card settings-card" id="settings-content"></div>
+  </section>
 </div>
+<footer class="statusbar"><span>今日效率 <b id="footer-score">--</b></span><span>连续专注 <b id="footer-streak">--</b> 天</span><span>本周总工时 <b id="footer-week-hours">--</b></span></footer>
 
 <!-- 编辑对话框 -->
 <div id="modal" class="modal hidden">

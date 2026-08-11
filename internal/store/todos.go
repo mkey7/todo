@@ -10,10 +10,10 @@ import (
 
 func scanTodo(scanner interface{ Scan(...any) error }) (models.Todo, error) {
 	var t models.Todo
-	var groupID, parentID sql.NullInt64
+	var parentID sql.NullInt64
 	var title, description, status sql.NullString
 	var dueDate, completedAt, createdAt sql.NullString
-	err := scanner.Scan(&t.ID, &groupID, &parentID, &title, &description,
+	err := scanner.Scan(&t.ID, &parentID, &title, &description,
 		&status, &t.Priority, &dueDate, &createdAt, &completedAt)
 	if err != nil {
 		return t, err
@@ -22,14 +22,13 @@ func scanTodo(scanner interface{ Scan(...any) error }) (models.Todo, error) {
 	t.Description = description.String
 	t.Status = status.String
 	t.CreatedAt = createdAt.String
-	t.GroupID = models.NullInt(groupID)
 	t.ParentID = models.NullInt(parentID)
 	t.DueDate = models.NullStr(dueDate)
 	t.CompletedAt = models.NullStr(completedAt)
 	return t, nil
 }
 
-const todoColumns = `id, group_id, parent_id, title, description, status, priority, due_date, created_at, completed_at`
+const todoColumns = `id, parent_id, title, description, status, priority, due_date, created_at, completed_at`
 
 // ListTodos returns todos optionally filtered by group_id and/or status.
 // Only top-level todos (parent_id IS NULL) are returned by default; children
@@ -38,7 +37,7 @@ func ListTodos(db *sql.DB, groupID *int64, status string) ([]models.Todo, error)
 	q := `SELECT ` + todoColumns + ` FROM todos WHERE parent_id IS NULL`
 	args := []any{}
 	if groupID != nil {
-		q += ` AND group_id = ?`
+		q += ` AND EXISTS (SELECT 1 FROM todo_tags tt WHERE tt.todo_id = todos.id AND tt.tag_id = ?)`
 		args = append(args, *groupID)
 	}
 	if status != "" {
@@ -51,8 +50,6 @@ func ListTodos(db *sql.DB, groupID *int64, status string) ([]models.Todo, error)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
 	var ts []models.Todo
 	for rows.Next() {
 		t, err := scanTodo(rows)
@@ -61,7 +58,17 @@ func ListTodos(db *sql.DB, groupID *int64, status string) ([]models.Todo, error)
 		}
 		ts = append(ts, t)
 	}
-	return ts, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close() // the DB intentionally has one connection; release it before tag queries.
+	for i := range ts {
+		if err := loadTodoTags(db, &ts[i]); err != nil {
+			return nil, err
+		}
+	}
+	return ts, nil
 }
 
 // listChildren returns direct children of a todo.
@@ -70,7 +77,6 @@ func listChildren(db *sql.DB, parentID int64) ([]models.Todo, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var ts []models.Todo
 	for rows.Next() {
 		t, err := scanTodo(rows)
@@ -79,7 +85,17 @@ func listChildren(db *sql.DB, parentID int64) ([]models.Todo, error) {
 		}
 		ts = append(ts, t)
 	}
-	return ts, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	for i := range ts {
+		if err := loadTodoTags(db, &ts[i]); err != nil {
+			return nil, err
+		}
+	}
+	return ts, nil
 }
 
 // WithChildren recursively populates Children on each todo.
@@ -93,15 +109,168 @@ func WithChildren(db *sql.DB, ts []models.Todo) ([]models.Todo, error) {
 		if err != nil {
 			return nil, err
 		}
+		applyInheritedTags(children, ts[i].Tags)
 		ts[i].Children = children
 	}
 	return ts, nil
 }
 
+// applyInheritedTags exposes the parent's tags on every child, including
+// subtasks created before tag inheritance was introduced. Child-specific tags
+// remain intact and are appended after inherited tags.
+func applyInheritedTags(todos []models.Todo, inherited []models.Group) {
+	for i := range todos {
+		seen := map[int64]bool{}
+		tags := make([]models.Group, 0, len(inherited)+len(todos[i].Tags))
+		for _, tag := range inherited {
+			if !seen[tag.ID] {
+				seen[tag.ID] = true
+				tags = append(tags, tag)
+			}
+		}
+		for _, tag := range todos[i].Tags {
+			if !seen[tag.ID] {
+				seen[tag.ID] = true
+				tags = append(tags, tag)
+			}
+		}
+		todos[i].InheritedTagIDs = make([]int64, 0, len(inherited))
+		todos[i].TagIDs = make([]int64, 0, len(tags))
+		for _, tag := range inherited {
+			todos[i].InheritedTagIDs = append(todos[i].InheritedTagIDs, tag.ID)
+		}
+		for _, tag := range tags {
+			todos[i].TagIDs = append(todos[i].TagIDs, tag.ID)
+		}
+		todos[i].Tags = tags
+		applyInheritedTags(todos[i].Children, tags)
+	}
+}
+
 // GetTodo fetches a single todo by id.
 func GetTodo(db *sql.DB, id int64) (models.Todo, error) {
 	row := db.QueryRow(`SELECT `+todoColumns+` FROM todos WHERE id = ?`, id)
-	return scanTodo(row)
+	t, err := scanTodo(row)
+	if err != nil {
+		return t, err
+	}
+	return t, loadTodoTags(db, &t)
+}
+
+func loadTodoTags(db *sql.DB, t *models.Todo) error {
+	rows, err := db.Query(`SELECT g.id, g.name, g.description, g.color, g.created_at
+		FROM todo_tags tt JOIN tags g ON g.id = tt.tag_id WHERE tt.todo_id = ? ORDER BY tt.tag_order, tt.tag_id`, t.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	t.Tags = []models.Group{}
+	t.TagIDs = []int64{}
+	for rows.Next() {
+		var g models.Group
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.Color, &g.CreatedAt); err != nil {
+			return err
+		}
+		t.Tags = append(t.Tags, g)
+		t.TagIDs = append(t.TagIDs, g.ID)
+	}
+	return rows.Err()
+}
+
+func mergeTagIDs(base, extra []int64) []int64 {
+	seen := map[int64]bool{}
+	out := make([]int64, 0, len(base)+len(extra))
+	for _, id := range append(base, extra...) {
+		if id > 0 && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// inheritParentTags ensures a subtask always keeps its parent's effective tags.
+func inheritParentTags(db *sql.DB, t *models.Todo) error {
+	if t.ParentID == nil {
+		return nil
+	}
+	parent, err := GetTodo(db, *t.ParentID)
+	if err != nil {
+		return fmt.Errorf("get parent tags: %w", err)
+	}
+	t.InheritedTagIDs = parent.TagIDs
+	t.TagIDs = mergeTagIDs(parent.TagIDs, t.TagIDs)
+	return nil
+}
+
+func setTodoTags(db *sql.DB, todoID int64, tagIDs []int64) error {
+	if _, err := db.Exec(`DELETE FROM todo_tags WHERE todo_id = ?`, todoID); err != nil {
+		return err
+	}
+	seen := map[int64]bool{}
+	for index, tagID := range tagIDs {
+		if tagID <= 0 || seen[tagID] {
+			continue
+		}
+		seen[tagID] = true
+		if _, err := db.Exec(`INSERT INTO todo_tags (todo_id, tag_id, tag_order) VALUES (?, ?, ?)`, todoID, tagID, index); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+const completedTagName = "已完成"
+
+// completedTagID returns the shared system tag used to mark completed todos,
+// creating it only when the first todo is completed.
+func completedTagID(db *sql.DB) (int64, error) {
+	var id int64
+	err := db.QueryRow(`SELECT id FROM tags WHERE name = ? ORDER BY id LIMIT 1`, completedTagName).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+	created, err := CreateGroup(db, models.Group{
+		Name:           completedTagName,
+		Description:    "系统自动添加：任务完成时标记",
+		Color:          "#22c55e",
+		IncludeInStats: func() *bool { v := false; return &v }(),
+	})
+	if err != nil {
+		return 0, err
+	}
+	return created.ID, nil
+}
+
+// syncCompletedTag keeps the automatic completed tag at the end of a task's
+// tag order, so it never replaces the task's primary timeline color.
+func syncCompletedTag(db *sql.DB, todoID int64, tagIDs []int64, completed bool) error {
+	var completedID int64
+	if completed {
+		var err error
+		completedID, err = completedTagID(db)
+		if err != nil {
+			return err
+		}
+	} else if err := db.QueryRow(`SELECT id FROM tags WHERE name = ? ORDER BY id LIMIT 1`, completedTagName).Scan(&completedID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	updated := make([]int64, 0, len(tagIDs)+1)
+	for _, tagID := range tagIDs {
+		if tagID != completedID {
+			updated = append(updated, tagID)
+		}
+	}
+	if completed {
+		updated = append(updated, completedID)
+	}
+	return setTodoTags(db, todoID, updated)
 }
 
 // CollectDescendantIDs returns all descendant todo IDs for the given todo,
@@ -137,20 +306,26 @@ func CreateTodo(db *sql.DB, t models.Todo) (models.Todo, error) {
 	if t.Status == "" {
 		t.Status = "pending"
 	}
+	if err := inheritParentTags(db, &t); err != nil {
+		return models.Todo{}, err
+	}
 	var completedAt any
 	if t.Status == "done" {
 		c := tutil.Now()
 		completedAt = c
 		t.CompletedAt = &c
 	}
-	res, err := db.Exec(`INSERT INTO todos (group_id, parent_id, title, description, status, priority, due_date, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.GroupID, t.ParentID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, completedAt)
+	res, err := db.Exec(`INSERT INTO todos (parent_id, title, description, status, priority, due_date, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		t.ParentID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, completedAt)
 	if err != nil {
 		return models.Todo{}, err
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
+		return models.Todo{}, err
+	}
+	if err := setTodoTags(db, id, t.TagIDs); err != nil {
 		return models.Todo{}, err
 	}
 	return GetTodo(db, id)
@@ -162,6 +337,12 @@ func UpdateTodo(db *sql.DB, id int64, t models.Todo) (models.Todo, error) {
 	if err != nil {
 		return models.Todo{}, err
 	}
+	if err := inheritParentTags(db, &t); err != nil {
+		return models.Todo{}, err
+	}
+	if t.TagIDs == nil {
+		t.TagIDs = existing.TagIDs
+	}
 	var completedAt any
 	if t.Status == "done" {
 		if existing.Status == "done" && existing.CompletedAt != nil {
@@ -171,10 +352,15 @@ func UpdateTodo(db *sql.DB, id int64, t models.Todo) (models.Todo, error) {
 			completedAt = c
 		}
 	}
-	if _, err := db.Exec(`UPDATE todos SET group_id = ?, parent_id = ?, title = ?, description = ?,
+	if _, err := db.Exec(`UPDATE todos SET parent_id = ?, title = ?, description = ?,
 		status = ?, priority = ?, due_date = ?, completed_at = ? WHERE id = ?`,
-		t.GroupID, t.ParentID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, completedAt, id); err != nil {
+		t.ParentID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, completedAt, id); err != nil {
 		return models.Todo{}, err
+	}
+	if t.TagIDs != nil {
+		if err := setTodoTags(db, id, t.TagIDs); err != nil {
+			return models.Todo{}, err
+		}
 	}
 	return GetTodo(db, id)
 }
@@ -201,6 +387,9 @@ func SetTodoStatus(db *sql.DB, id int64, status string) (models.Todo, error) {
 	}
 	if _, err := db.Exec(`UPDATE todos SET status = ?, completed_at = ? WHERE id = ?`,
 		status, completedAt, id); err != nil {
+		return existing, err
+	}
+	if err := syncCompletedTag(db, id, existing.TagIDs, status == "done"); err != nil {
 		return existing, err
 	}
 	return GetTodo(db, id)

@@ -109,7 +109,7 @@ func mondayOfISOWeek(year, week int) time.Time {
 	if wd == 0 {
 		wd = 7 // Sunday -> 7 (ISO Monday=1)
 	}
-	mondayWeek1 := jan4.AddDate(0, 0, -(wd-1))
+	mondayWeek1 := jan4.AddDate(0, 0, -(wd - 1))
 	return mondayWeek1.AddDate(0, 0, (week-1)*7)
 }
 

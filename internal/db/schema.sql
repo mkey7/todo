@@ -1,14 +1,21 @@
-CREATE TABLE IF NOT EXISTS groups (
+CREATE TABLE IF NOT EXISTS tags (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT    NOT NULL,
+    description TEXT   NOT NULL DEFAULT '',
     color      TEXT    NOT NULL DEFAULT '#6b7280',
-    sort_order INTEGER NOT NULL DEFAULT 0,
+    include_in_stats INTEGER NOT NULL DEFAULT 1,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS todo_tags (
+    todo_id INTEGER NOT NULL,
+    tag_id  INTEGER NOT NULL,
+    tag_order INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (todo_id, tag_id)
 );
 
 CREATE TABLE IF NOT EXISTS todos (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    group_id     INTEGER,
     parent_id    INTEGER,
     title        TEXT    NOT NULL,
     description  TEXT    NOT NULL DEFAULT '',
@@ -16,34 +23,36 @@ CREATE TABLE IF NOT EXISTS todos (
     priority     INTEGER NOT NULL DEFAULT 0,
     due_date     TEXT,
     created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    completed_at DATETIME,
-    FOREIGN KEY (group_id)  REFERENCES groups(id) ON DELETE SET NULL,
-    FOREIGN KEY (parent_id) REFERENCES todos(id) ON DELETE CASCADE
+    completed_at DATETIME
 );
 
 CREATE TABLE IF NOT EXISTS time_entries (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     todo_id    INTEGER,
-    group_id   INTEGER,
+    tag_id     INTEGER,
     start_time TEXT    NOT NULL,
     end_time   TEXT,
     note       TEXT    NOT NULL DEFAULT '',
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (todo_id)  REFERENCES todos(id) ON DELETE SET NULL,
-    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE SET NULL
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS daily_summaries (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     date        TEXT    NOT NULL UNIQUE,
-    improvement TEXT    NOT NULL DEFAULT '',
-    notes       TEXT    NOT NULL DEFAULT '',
+    content     TEXT    NOT NULL DEFAULT '',
     updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_todos_group        ON todos(group_id);
+CREATE TABLE IF NOT EXISTS weekly_summaries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    week        TEXT    NOT NULL UNIQUE,
+    content     TEXT    NOT NULL DEFAULT '',
+    updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+
 CREATE INDEX IF NOT EXISTS idx_todos_parent       ON todos(parent_id);
 CREATE INDEX IF NOT EXISTS idx_todos_status       ON todos(status);
 CREATE INDEX IF NOT EXISTS idx_time_entries_start ON time_entries(start_time);
 CREATE INDEX IF NOT EXISTS idx_time_entries_todo  ON time_entries(todo_id);
-CREATE INDEX IF NOT EXISTS idx_time_entries_group ON time_entries(group_id);
+CREATE INDEX IF NOT EXISTS idx_todo_tags_tag ON todo_tags(tag_id);

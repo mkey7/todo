@@ -10,33 +10,35 @@ import (
 
 func scanEntry(scanner interface{ Scan(...any) error }) (models.TimeEntry, error) {
 	var e models.TimeEntry
-	var todoID, groupID sql.NullInt64
+	var todoID, tagID sql.NullInt64
 	var endTime, note, createdAt sql.NullString
-	var groupName, groupColor, todoTitle sql.NullString
-	err := scanner.Scan(&e.ID, &todoID, &groupID, &e.StartTime, &endTime,
-		&note, &createdAt, &groupName, &groupColor, &todoTitle)
+	var groupName, groupColor, todoTitle, todoPrimaryColor sql.NullString
+	err := scanner.Scan(&e.ID, &todoID, &tagID, &e.StartTime, &endTime,
+		&note, &createdAt, &groupName, &groupColor, &todoTitle, &todoPrimaryColor)
 	if err != nil {
 		return e, err
 	}
 	e.TodoID = models.NullInt(todoID)
-	e.GroupID = models.NullInt(groupID)
+	e.TagID = models.NullInt(tagID)
 	e.EndTime = models.NullStr(endTime)
 	e.Note = note.String
 	e.CreatedAt = createdAt.String
-	e.GroupName = groupName.String
-	e.GroupColor = groupColor.String
+	e.TagName = groupName.String
+	e.TagColor = groupColor.String
 	e.TodoTitle = todoTitle.String
+	e.TodoPrimaryColor = todoPrimaryColor.String
 	return e, nil
 }
 
 // entryColumns includes joined group/todo display fields.
-const entryColumns = `te.id, te.todo_id, te.group_id, te.start_time, te.end_time, te.note, te.created_at,
-	g.name AS group_name, g.color AS group_color, t.title AS todo_title`
+const entryColumns = `te.id, te.todo_id, te.tag_id, te.start_time, te.end_time, te.note, te.created_at,
+	g.name AS tag_name, g.color AS tag_color, t.title AS todo_title, primary_tag.color AS todo_primary_color`
 
 func entryQuery(where string, args ...any) string {
 	return fmt.Sprintf(`SELECT %s FROM time_entries te
-		LEFT JOIN groups g ON g.id = te.group_id
+		LEFT JOIN tags g ON g.id = te.tag_id
 		LEFT JOIN todos t ON t.id = te.todo_id
+		LEFT JOIN tags primary_tag ON primary_tag.id = (SELECT tag_id FROM todo_tags WHERE todo_id = t.id ORDER BY tag_order LIMIT 1)
 		WHERE %s ORDER BY te.start_time ASC`, entryColumns, where)
 }
 
@@ -86,13 +88,13 @@ func GetEntry(db *sql.DB, id int64) (models.TimeEntry, error) {
 }
 
 // StartEntry creates a new in-progress entry, first stopping any active entry.
-func StartEntry(db *sql.DB, todoID *int64, groupID *int64, note string) (models.TimeEntry, error) {
-	// Inherit group from the todo if not provided.
-	if groupID == nil && todoID != nil {
+func StartEntry(db *sql.DB, todoID *int64, tagID *int64, note string) (models.TimeEntry, error) {
+	// Inherit the primary tag from the todo if not provided.
+	if tagID == nil && todoID != nil {
 		var g sql.NullInt64
-		if err := db.QueryRow(`SELECT group_id FROM todos WHERE id = ?`, *todoID).Scan(&g); err == nil && g.Valid {
+		if err := db.QueryRow(`SELECT tag_id FROM todo_tags WHERE todo_id = ? ORDER BY tag_order LIMIT 1`, *todoID).Scan(&g); err == nil && g.Valid {
 			v := g.Int64
-			groupID = &v
+			tagID = &v
 		}
 	}
 	now := tutil.Now()
@@ -105,8 +107,8 @@ func StartEntry(db *sql.DB, todoID *int64, groupID *int64, note string) (models.
 		tx.Rollback()
 		return models.TimeEntry{}, err
 	}
-	res, err := tx.Exec(`INSERT INTO time_entries (todo_id, group_id, start_time, note) VALUES (?, ?, ?, ?)`,
-		todoID, groupID, now, note)
+	res, err := tx.Exec(`INSERT INTO time_entries (todo_id, tag_id, start_time, note) VALUES (?, ?, ?, ?)`,
+		todoID, tagID, now, note)
 	if err != nil {
 		tx.Rollback()
 		return models.TimeEntry{}, err
@@ -159,15 +161,15 @@ func CreateEntry(db *sql.DB, e models.TimeEntry) (models.TimeEntry, error) {
 	if e.EndTime != nil && *e.EndTime != "" && *e.EndTime <= e.StartTime {
 		return models.TimeEntry{}, fmt.Errorf("结束时间必须晚于开始时间")
 	}
-	if e.GroupID == nil && e.TodoID != nil {
+	if e.TagID == nil && e.TodoID != nil {
 		var g sql.NullInt64
-		if err := db.QueryRow(`SELECT group_id FROM todos WHERE id = ?`, *e.TodoID).Scan(&g); err == nil && g.Valid {
+		if err := db.QueryRow(`SELECT tag_id FROM todo_tags WHERE todo_id = ? ORDER BY tag_order LIMIT 1`, *e.TodoID).Scan(&g); err == nil && g.Valid {
 			v := g.Int64
-			e.GroupID = &v
+			e.TagID = &v
 		}
 	}
-	res, err := db.Exec(`INSERT INTO time_entries (todo_id, group_id, start_time, end_time, note)
-		VALUES (?, ?, ?, ?, ?)`, e.TodoID, e.GroupID, e.StartTime, e.EndTime, e.Note)
+	res, err := db.Exec(`INSERT INTO time_entries (todo_id, tag_id, start_time, end_time, note)
+		VALUES (?, ?, ?, ?, ?)`, e.TodoID, e.TagID, e.StartTime, e.EndTime, e.Note)
 	if err != nil {
 		return models.TimeEntry{}, err
 	}
@@ -183,15 +185,15 @@ func UpdateEntry(db *sql.DB, id int64, e models.TimeEntry) (models.TimeEntry, er
 	if e.EndTime != nil && *e.EndTime != "" && *e.EndTime <= e.StartTime {
 		return models.TimeEntry{}, fmt.Errorf("结束时间必须晚于开始时间")
 	}
-	if e.GroupID == nil && e.TodoID != nil {
+	if e.TagID == nil && e.TodoID != nil {
 		var g sql.NullInt64
-		if err := db.QueryRow(`SELECT group_id FROM todos WHERE id = ?`, *e.TodoID).Scan(&g); err == nil && g.Valid {
+		if err := db.QueryRow(`SELECT tag_id FROM todo_tags WHERE todo_id = ? ORDER BY tag_order LIMIT 1`, *e.TodoID).Scan(&g); err == nil && g.Valid {
 			v := g.Int64
-			e.GroupID = &v
+			e.TagID = &v
 		}
 	}
-	if _, err := db.Exec(`UPDATE time_entries SET todo_id = ?, group_id = ?, start_time = ?, end_time = ?, note = ? WHERE id = ?`,
-		e.TodoID, e.GroupID, e.StartTime, e.EndTime, e.Note, id); err != nil {
+	if _, err := db.Exec(`UPDATE time_entries SET todo_id = ?, tag_id = ?, start_time = ?, end_time = ?, note = ? WHERE id = ?`,
+		e.TodoID, e.TagID, e.StartTime, e.EndTime, e.Note, id); err != nil {
 		return models.TimeEntry{}, err
 	}
 	return GetEntry(db, id)

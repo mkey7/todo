@@ -62,7 +62,11 @@ func AnalyzeWeekly(db *sql.DB, week string) (WeeklyResult, error) {
 		}
 	}
 
-	res.GroupBreakdown = buildGroupBreakdown(entries, res.TotalSeconds)
+	res.GroupBreakdown, err = buildGroupBreakdown(db, entries, res.TotalSeconds)
+	if err != nil {
+		return WeeklyResult{}, err
+	}
+	res.TodoBreakdown = buildTodoBreakdown(entries, res.TotalSeconds)
 
 	// Best / slowest day (only counting days with any work).
 	for i := range res.DailyTrend {
@@ -125,7 +129,7 @@ func weeklySummaryText(r WeeklyResult) string {
 	}
 	if len(r.GroupBreakdown) > 0 {
 		g := r.GroupBreakdown[0]
-		parts = append(parts, fmt.Sprintf("主要投入在「%s」(%.0f%%)。", g.GroupName, g.Percent))
+		parts = append(parts, fmt.Sprintf("主要投入在标签「%s」(%.0f%%)。", g.GroupName, g.Percent))
 	}
 	if r.VsLastWeek != nil && r.VsLastWeek.LastWeekSeconds > 0 {
 		d := r.VsLastWeek

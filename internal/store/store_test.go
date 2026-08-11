@@ -77,10 +77,67 @@ func TestTodoSubtasksAndStatus(t *testing.T) {
 	}
 }
 
+func TestSubtaskInheritsAndExtendsParentTags(t *testing.T) {
+	d := newTestDB(t)
+	work, _ := CreateGroup(d, models.Group{Name: "工作", Color: "#6366f1"})
+	urgent, _ := CreateGroup(d, models.Group{Name: "紧急", Color: "#ef4444"})
+	parent, err := CreateTodo(d, models.Todo{Title: "父任务", TagIDs: []int64{work.ID}})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	child, err := CreateTodo(d, models.Todo{Title: "子任务", ParentID: &parent.ID, TagIDs: []int64{urgent.ID}})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if len(child.TagIDs) != 2 || child.TagIDs[0] != work.ID || child.TagIDs[1] != urgent.ID {
+		t.Fatalf("child tags = %v, want inherited and additional tags", child.TagIDs)
+	}
+}
+
+func TestTodoTagOrderSetsPrimaryTag(t *testing.T) {
+	d := newTestDB(t)
+	first, _ := CreateGroup(d, models.Group{Name: "第一", Color: "#6366f1"})
+	second, _ := CreateGroup(d, models.Group{Name: "第二", Color: "#ef4444"})
+	todo, err := CreateTodo(d, models.Todo{Title: "排序", TagIDs: []int64{first.ID, second.ID}})
+	if err != nil {
+		t.Fatalf("create todo: %v", err)
+	}
+	updated, err := UpdateTodo(d, todo.ID, models.Todo{Title: todo.Title, Status: todo.Status, TagIDs: []int64{second.ID, first.ID}})
+	if err != nil {
+		t.Fatalf("update todo: %v", err)
+	}
+	if len(updated.TagIDs) != 2 || updated.TagIDs[0] != second.ID {
+		t.Errorf("tag order / primary group = %+v", updated)
+	}
+}
+
+func TestCompletedTodoGetsAutomaticCompletedTag(t *testing.T) {
+	d := newTestDB(t)
+	work, _ := CreateGroup(d, models.Group{Name: "工作", Color: "#6366f1"})
+	todo, err := CreateTodo(d, models.Todo{Title: "完成标签", TagIDs: []int64{work.ID}})
+	if err != nil {
+		t.Fatalf("create todo: %v", err)
+	}
+	done, err := SetTodoStatus(d, todo.ID, "done")
+	if err != nil {
+		t.Fatalf("complete todo: %v", err)
+	}
+	if len(done.Tags) != 2 || done.Tags[1].Name != completedTagName || done.TagIDs[0] != work.ID {
+		t.Errorf("completed tags = %+v, want work then completed", done.Tags)
+	}
+	pending, err := SetTodoStatus(d, todo.ID, "pending")
+	if err != nil {
+		t.Fatalf("reopen todo: %v", err)
+	}
+	if len(pending.Tags) != 1 || pending.Tags[0].Name != "工作" {
+		t.Errorf("reopened tags = %+v, want only work", pending.Tags)
+	}
+}
+
 func TestTimeEntryStartStop(t *testing.T) {
 	d := newTestDB(t)
 	g, _ := CreateGroup(d, models.Group{Name: "开发", Color: "#6366f1"})
-	todo, _ := CreateTodo(d, models.Todo{Title: "任务", GroupID: &g.ID})
+	todo, _ := CreateTodo(d, models.Todo{Title: "任务", TagIDs: []int64{g.ID}})
 
 	// start with a todo -> group inherited
 	e, err := StartEntry(d, &todo.ID, nil, "")
@@ -90,8 +147,8 @@ func TestTimeEntryStartStop(t *testing.T) {
 	if e.EndTime != nil {
 		t.Errorf("new entry should be open")
 	}
-	if e.GroupID == nil || *e.GroupID != g.ID {
-		t.Errorf("group not inherited: %+v", e.GroupID)
+	if e.TagID == nil || *e.TagID != g.ID {
+		t.Errorf("tag not inherited: %+v", e.TagID)
 	}
 
 	// active entry exists
@@ -131,11 +188,11 @@ func TestListEntriesForDayOverlap(t *testing.T) {
 	d := newTestDB(t)
 	g, _ := CreateGroup(d, models.Group{Name: "开发", Color: "#6366f1"})
 	// entry fully within the day
-	CreateEntry(d, models.TimeEntry{GroupID: &g.ID, StartTime: "2026-07-14 09:00:00", EndTime: strPtr("2026-07-14 10:00:00")})
+	CreateEntry(d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 09:00:00", EndTime: strPtr("2026-07-14 10:00:00")})
 	// entry that ends exactly at day start should NOT appear (end > dayStart is required, 00:00:00 is not > 00:00:00)
-	CreateEntry(d, models.TimeEntry{GroupID: &g.ID, StartTime: "2026-07-13 22:00:00", EndTime: strPtr("2026-07-14 00:00:00")})
+	CreateEntry(d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-13 22:00:00", EndTime: strPtr("2026-07-14 00:00:00")})
 	// entry starting just before midnight and ending mid-day should appear (overlap)
-	CreateEntry(d, models.TimeEntry{GroupID: &g.ID, StartTime: "2026-07-14 23:30:00", EndTime: strPtr("2026-07-15 01:00:00")})
+	CreateEntry(d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 23:30:00", EndTime: strPtr("2026-07-15 01:00:00")})
 
 	es, err := ListEntriesForDay(d, "2026-07-14")
 	if err != nil {

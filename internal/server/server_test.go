@@ -55,7 +55,7 @@ func TestAPICreateGroupAndTodo(t *testing.T) {
 	gid := int64(g["id"].(float64))
 
 	// create a todo in that group
-	resp = do(t, "POST", s.URL+"/api/todos", map[string]any{"title": "写文档", "group_id": gid})
+	resp = do(t, "POST", s.URL+"/api/todos", map[string]any{"title": "写文档", "tag_ids": []int64{gid}})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create todo status = %d", resp.StatusCode)
 	}
@@ -88,7 +88,7 @@ func TestAPICreateGroupAndTodo(t *testing.T) {
 
 	// create a manual time entry
 	resp = do(t, "POST", s.URL+"/api/time-entries", map[string]any{
-		"group_id": gid, "start_time": "2026-07-14 09:00:00", "end_time": "2026-07-14 10:30:00",
+		"tag_id": gid, "start_time": "2026-07-14 09:00:00", "end_time": "2026-07-14 10:30:00",
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create entry status = %d", resp.StatusCode)
@@ -123,7 +123,7 @@ func TestAPICreateGroupAndTodo(t *testing.T) {
 	}
 
 	// put daily summary
-	resp = do(t, "PUT", s.URL+"/api/summaries/daily?date=2026-07-14", map[string]any{"improvement": "学会了时间轴", "notes": ""})
+	resp = do(t, "PUT", s.URL+"/api/summaries/daily?date=2026-07-14", map[string]any{"content": "学会了时间轴"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("put summary status = %d", resp.StatusCode)
 	}
@@ -134,8 +134,21 @@ func TestAPICreateGroupAndTodo(t *testing.T) {
 	var summ map[string]any
 	json.NewDecoder(resp.Body).Decode(&summ)
 	resp.Body.Close()
-	if summ["improvement"] != "学会了时间轴" {
-		t.Errorf("summary improvement = %v", summ["improvement"])
+	if summ["content"] != "学会了时间轴" {
+		t.Errorf("summary content = %v", summ["content"])
+	}
+
+	resp = do(t, "PUT", s.URL+"/api/summaries/weekly?week=2026-W29", map[string]any{"content": "本周完成时间轴"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("put weekly summary status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = do(t, "GET", s.URL+"/api/summaries/weekly?week=2026-W29", nil)
+	var weeklySumm map[string]any
+	json.NewDecoder(resp.Body).Decode(&weeklySumm)
+	resp.Body.Close()
+	if weeklySumm["content"] != "本周完成时间轴" {
+		t.Errorf("weekly summary content = %v", weeklySumm["content"])
 	}
 }
 
@@ -144,7 +157,7 @@ func TestAPIStartStopTimer(t *testing.T) {
 	defer s.Close()
 
 	// start
-	resp := do(t, "POST", s.URL+"/api/time-entries/start", map[string]any{"group_id": nil, "note": "测试"})
+	resp := do(t, "POST", s.URL+"/api/time-entries/start", map[string]any{"tag_id": nil, "note": "测试"})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("start status = %d", resp.StatusCode)
 	}

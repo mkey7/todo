@@ -40,18 +40,18 @@ func (h *Handler) ActiveTimeEntry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, e)
 }
 
-// POST /api/time-entries/start  {todo_id?, group_id?, note?}
+// POST /api/time-entries/start  {todo_id?, tag_id?, note?}
 func (h *Handler) StartTimeEntry(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		TodoID  *int64 `json:"todo_id"`
-		GroupID *int64 `json:"group_id"`
-		Note    string `json:"note"`
+		TodoID *int64 `json:"todo_id"`
+		TagID  *int64 `json:"tag_id"`
+		Note   string `json:"note"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	e, err := store.StartEntry(h.DB, body.TodoID, body.GroupID, body.Note)
+	e, err := store.StartEntry(h.DB, body.TodoID, body.TagID, body.Note)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

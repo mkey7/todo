@@ -52,10 +52,17 @@ const state = {
   analysisWeek: '',
   todayMode: 'timer',      // 'timer' | 'backfill'
   todayShowDone: false,    // 任务列表是否显示已完成
-  timelineZoom: '12h',     // '24h' | '12h' (9-21)
+  todayTaskTag: '',
+  timelineZoom: '12h',     // '24h' | configured work range
   weekHourPx: 90,          // weekly vertical timeline: pixels per hour (zoom)
   todoFilter: 'all',       // 'all' | 'pending' | 'done'
   todoSort: 'newest',      // 'newest' | 'oldest'
+  todoTagIDs: [],          // selected tag ids for the todo list
+  todoExcludedTagIDs: [],  // selected NOT tag ids for the todo list
+  todoTagRule: 'or',       // 'or' matches any tag; 'and' matches every tag
+  theme: localStorage.getItem('todo-theme') || 'light',
+  timelineWorkStart: Number(localStorage.getItem('todo-timeline-work-start') || 9),
+  timelineWorkEnd: Number(localStorage.getItem('todo-timeline-work-end') || 21),
 };
 
 function groupColor(id) {
@@ -66,9 +73,27 @@ function groupName(id) {
   const g = state.groups.find(x => x.id === id);
   return g ? g.name : '未分组';
 }
+function entryColor(entry) {
+  return entry.todo_primary_color || groupColor(entry.tag_id);
+}
+function tagIDByName(name) {
+  const tag = state.groups.find(t => t.name === name);
+  return tag ? tag.id : null;
+}
+async function ensureTag(name, color) {
+  const id = tagIDByName(name);
+  if (id) return id;
+  const tag = await api('POST', '/api/tags', { name, description: '系统状态标签', color, include_in_stats: false });
+  await loadGroups();
+  return tag.id;
+}
+function entryTitle(entry) {
+  return entry.todo_title || '未关联任务';
+}
 
 // ---------- init ----------
 async function init() {
+  applyTheme();
   startClock();
   bindNav();
   bindToday();
@@ -82,6 +107,7 @@ async function init() {
 }
 
 function startClock() {
+  if (!$('#clock')) return;
   const tick = () => { $('#clock').textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false }); };
   tick(); setInterval(tick, 1000);
 }
@@ -98,14 +124,61 @@ function renderView(view) {
   if (view === 'today') renderToday();
   if (view === 'todos') renderTodos();
   if (view === 'analysis') renderAnalysis();
+  if (view === 'settings') renderSettings();
+}
+
+function applyTheme() {
+  document.documentElement.dataset.theme = state.theme;
+}
+function saveSettings() {
+  localStorage.setItem('todo-theme', state.theme);
+  localStorage.setItem('todo-timeline-work-start', String(state.timelineWorkStart));
+  localStorage.setItem('todo-timeline-work-end', String(state.timelineWorkEnd));
+  applyTheme();
+}
+function renderSettings() {
+  const host = $('#settings-content');
+  host.innerHTML = '';
+  host.appendChild(el('h3', {}, '设置'));
+  const themeField = el('div', { class: 'settings-field' }, el('label', {}, '主题'));
+  const themeOptions = el('div', { class: 'seg' });
+  for (const option of [{ key: 'light', label: '白色' }, { key: 'dark', label: '黑色' }]) {
+    themeOptions.appendChild(el('button', { class: 'seg-btn' + (state.theme === option.key ? ' active' : ''), onclick: () => { state.theme = option.key; saveSettings(); renderSettings(); } }, option.label));
+  }
+  themeField.appendChild(themeOptions);
+  host.appendChild(themeField);
+
+  const rangeField = el('div', { class: 'settings-field' }, el('label', {}, '工作时段时间轴'));
+  const range = el('div', { class: 'row' });
+  const start = el('select', { class: 'select', 'aria-label': '工作时段开始时间' });
+  const end = el('select', { class: 'select', 'aria-label': '工作时段结束时间' });
+  for (let h = 0; h < 24; h++) start.appendChild(el('option', { value: h }, String(h).padStart(2, '0') + ':00'));
+  for (let h = 1; h <= 24; h++) end.appendChild(el('option', { value: h }, String(h).padStart(2, '0') + ':00'));
+  start.value = String(state.timelineWorkStart); end.value = String(state.timelineWorkEnd);
+  const saveRange = () => {
+    const s = Number(start.value), e = Number(end.value);
+    if (e <= s) { alert('结束时间必须晚于开始时间'); return; }
+    state.timelineWorkStart = s; state.timelineWorkEnd = e; saveSettings();
+  };
+  start.addEventListener('change', saveRange); end.addEventListener('change', saveRange);
+  range.append(start, el('span', { class: 'settings-range-sep' }, '至'), end);
+  rangeField.appendChild(range);
+  rangeField.appendChild(el('span', { class: 'settings-hint' }, '“工作时段”模式使用此范围；“全天”模式固定展示 24 小时。'));
+  host.appendChild(rangeField);
+}
+
+function timelineRange(zoom) {
+  return zoom === '24h'
+    ? { start: 0, end: 24 }
+    : { start: state.timelineWorkStart, end: state.timelineWorkEnd };
 }
 
 // ---------- data loaders ----------
 async function loadGroups() {
-  state.groups = await api('GET', '/api/groups');
+  state.groups = await api('GET', '/api/tags');
   if (state.groups.length === 0) {
-    await api('POST', '/api/groups', { name: '默认', color: '#6366f1', sort_order: 0 });
-    state.groups = await api('GET', '/api/groups');
+    await api('POST', '/api/tags', { name: '默认', description: '默认标签', color: '#6366f1' });
+    state.groups = await api('GET', '/api/tags');
   }
 }
 async function loadTodos() {
@@ -113,6 +186,7 @@ async function loadTodos() {
 }
 async function refreshActiveEntry() {
   state.activeEntry = await api('GET', '/api/time-entries/active');
+  renderNavTimer();
 }
 
 // ============================================================
@@ -127,17 +201,8 @@ function bindToday() {
   });
   // 计时
   $('#timer-toggle').addEventListener('click', onTimerToggle);
-  $('#timer-todo').addEventListener('change', e => {
-    // 选中 todo（含子任务）后自动带出其分组
-    const t = findTodoById(e.target.value);
-    if (t && t.group_id) $('#timer-group').value = String(t.group_id);
-    // For sub-tasks without their own group_id, find the parent's group
-    if (t && !t.group_id && t.parent_id) {
-      const parent = findTodoById(t.parent_id);
-      if (parent && parent.group_id) $('#timer-group').value = String(parent.group_id);
-    }
-  });
-  // 分组选择变化时联动过滤待办列表
+  $('#nav-active-timer-stop').addEventListener('click', onTimerToggle);
+  // 标签只用于筛选；实际记录优先由选中的任务决定。
   $('#timer-group').addEventListener('change', () => {
     const gid = $('#timer-group').value ? Number($('#timer-group').value) : null;
     fillTodoSelect($('#timer-todo'), null, gid);
@@ -151,10 +216,8 @@ function bindToday() {
   // 任务与分组
   $('#today-add-group').addEventListener('click', () => openGroupModal(null));
   $('#today-add-todo').addEventListener('click', () => openTodoModal(null));
-  $('#today-show-done').addEventListener('change', e => {
-    state.todayShowDone = e.target.checked;
-    renderTodayTasks();
-  });
+  $('#today-task-filter').addEventListener('change', e => { state.todayTaskTag = e.target.value; renderTodayTasks(); });
+  $('#today-quick-add').addEventListener('click', () => openTodoModal(null));
   // 时间轴缩放
   $('#timeline-zoom-seg').addEventListener('click', e => {
     const b = e.target.closest('.seg-btn');
@@ -176,6 +239,9 @@ function setTodayMode(mode) {
 }
 
 async function renderToday() {
+  // Refresh source data before calculating the overview; never render it
+  // from a stale todo list or an old active-timer snapshot.
+  await Promise.all([loadTodos(), refreshActiveEntry()]);
   renderRecorder();
   renderTodayTasks();
   await renderTodayTimelineAnalysis();
@@ -185,16 +251,16 @@ async function renderToday() {
 // 填充计时/补录两套下拉 + 计时器显示
 function renderRecorder() {
   fillGroupSelect($('#timer-group'), null);
-  fillTodoSelect($('#timer-todo'), null);
+  fillTodoSelect($('#timer-todo'), null, $('#timer-group').value ? Number($('#timer-group').value) : null);
   fillGroupSelect($('#bf-group'), null);
-  fillTodoSelect($('#bf-todo'), null);
+  fillTodoSelect($('#bf-todo'), null, $('#bf-group').value ? Number($('#bf-group').value) : null);
   if (!$('#bf-date').value) { $('#bf-date').value = todayStr(); $('#bf-end-date').value = todayStr(); }
   renderTimer();
 }
 
 function fillGroupSelect(sel, selectedId) {
   const prev = sel.value;
-  sel.innerHTML = '<option value="">未分组</option>';
+  sel.innerHTML = '<option value="">全部标签</option>';
   for (const g of state.groups) {
     const opt = el('option', { value: g.id }, g.name);
     if (selectedId && Number(selectedId) === g.id) opt.selected = true;
@@ -213,16 +279,17 @@ function fillTodoSelect(sel, selectedId, groupId) {
     for (const t of todos) {
       if (t.status === 'done') continue;
       // For sub-tasks, use the parent's group_id for filtering
-      const effectiveGroupId = t.parent_id ? (parentGroupId ?? t.group_id) : t.group_id;
+      const effectiveGroupId = t.parent_id ? (parentGroupId ?? (t.tag_ids || [])[0]) : (t.tag_ids || [])[0];
+      const tagIDs = t.tag_ids || (effectiveGroupId ? [effectiveGroupId] : []);
       if (groupId != null) {
-        if (effectiveGroupId !== groupId && effectiveGroupId != null) continue;
+        if (!tagIDs.includes(groupId)) continue;
       }
       const indent = depth > 0 ? '  '.repeat(depth) + '└ ' : '';
       const hasKids = t.children && t.children.length;
       const label = indent + t.title + (hasKids && depth === 0 ? ' …' : '');
       flatList.push({ id: t.id, label, groupId: effectiveGroupId });
       if (t.children && t.children.length) {
-        walk(t.children, depth + 1, t.group_id);
+        walk(t.children, depth + 1, (t.tag_ids || [])[0]);
       }
     }
   }
@@ -255,24 +322,31 @@ function renderTimer() {
   const active = state.activeEntry;
   const btn = $('#timer-toggle');
   if (active) {
-    btn.textContent = '停止';
+    btn.textContent = '结束计时';
     btn.classList.add('btn-danger');
     const info = $('#timer-active-info');
     info.innerHTML = '';
-    info.appendChild(document.createTextNode('正在记录：'));
-    info.appendChild(el('b', {}, groupName(active.group_id)));
-    if (active.todo_title) info.appendChild(document.createTextNode(' · ' + active.todo_title));
+    info.appendChild(document.createTextNode('正在计时：'));
+    info.appendChild(el('b', {}, active.todo_title || groupName(active.tag_id)));
+    if (active.todo_title && active.tag_id) info.appendChild(document.createTextNode(' · ' + groupName(active.tag_id)));
     if (active.note) info.appendChild(document.createTextNode(' · ' + active.note));
-    // 补录模式下计时主体被隐藏，补一个始终可见的停止按钮
-    const stopBtn = el('button', { class: 'btn btn-small btn-danger', style: 'margin-left:8px', onclick: onTimerToggle }, '停止计时');
-    info.appendChild(stopBtn);
     updateElapsed();
   } else {
-    btn.textContent = '开始';
+    btn.textContent = '开始计时';
     btn.classList.remove('btn-danger');
     $('#timer-active-info').textContent = '';
     $('#timer-elapsed').textContent = '--:--:--';
   }
+  renderNavTimer();
+}
+function renderNavTimer() {
+  const wrap = $('#nav-active-timer');
+  if (!wrap) return;
+  const active = state.activeEntry;
+  wrap.classList.toggle('hidden', !active);
+  if (!active) return;
+  $('#nav-active-timer-title').textContent = active.todo_title || groupName(active.tag_id);
+  updateElapsed();
 }
 function updateElapsed() {
   const a = state.activeEntry;
@@ -283,8 +357,20 @@ function updateElapsed() {
   const m = String(Math.floor((secs % 3600) / 60)).padStart(2, '0');
   const s = String(secs % 60).padStart(2, '0');
   $('#timer-elapsed').textContent = `${h}:${m}:${s}`;
+  const navElapsed = $('#nav-active-timer-elapsed');
+  if (navElapsed) navElapsed.textContent = `${h}:${m}:${s}`;
+  $$('[data-task-elapsed]').forEach(node => { node.textContent = '计时中 ' + `${h}:${m}:${s}`; });
 }
-setInterval(() => { if (state.activeEntry && state.view === 'today') updateElapsed(); }, 1000);
+setInterval(() => {
+  if (state.activeEntry) updateElapsed();
+  updateTimelineNow();
+}, 1000);
+
+// Recalculate the overview while the user is on Today. Active entries use
+// the current time in the analysis service, so this keeps total hours live.
+setInterval(() => {
+  if (state.view === 'today') void renderTodayTimelineAnalysis().catch(() => {});
+}, 60 * 1000);
 
 async function onTimerToggle() {
   try {
@@ -292,17 +378,20 @@ async function onTimerToggle() {
       await api('POST', '/api/time-entries/stop');
       state.activeEntry = null;
     } else {
-      const groupId = $('#timer-group').value;
       const todoId = $('#timer-todo').value;
       const note = $('#timer-note').value.trim();
       state.activeEntry = await api('POST', '/api/time-entries/start', {
-        group_id: groupId ? Number(groupId) : null,
+        // With a task selected, the server inherits its primary tag. The tag
+        // selector above is intentionally a filter rather than an assignment.
+        tag_id: todoId ? null : ($('#timer-group').value ? Number($('#timer-group').value) : null),
         todo_id: todoId ? Number(todoId) : null,
         note,
       });
       $('#timer-note').value = '';
     }
+    await loadTodos();
     renderTimer();
+    renderTodayTasks();
     await renderTodayTimelineAnalysis();
     await renderTodayEntries();
   } catch (e) { alert(e.message); }
@@ -323,8 +412,8 @@ async function onBackfillAdd() {
     start_time: startDt,
     end_time: endDt,
     note: $('#bf-note').value.trim(),
-    group_id: $('#bf-group').value ? Number($('#bf-group').value) : null,
     todo_id: $('#bf-todo').value ? Number($('#bf-todo').value) : null,
+    tag_id: $('#bf-todo').value ? null : ($('#bf-group').value ? Number($('#bf-group').value) : null),
   };
   try {
     await api('POST', '/api/time-entries', body);
@@ -340,9 +429,10 @@ async function onBackfillAdd() {
 // 时间轴 + 每日分析 合并展示
 async function renderTodayTimelineAnalysis() {
   const date = todayStr();
-  const [entries, r] = await Promise.all([
+  const [entries, r, weekly] = await Promise.all([
     api('GET', '/api/time-entries?date=' + date),
     api('GET', '/api/analysis/daily?date=' + date),
+    api('GET', '/api/analysis/weekly?week=' + currentISOWeek()),
   ]);
   const wrap = $('#today-timeline-wrap');
   wrap.innerHTML = '';
@@ -351,116 +441,146 @@ async function renderTodayTimelineAnalysis() {
   wrap.appendChild(buildTimeline(entries, true, date, state.timelineZoom));
   const host = $('#today-analysis');
   host.innerHTML = '';
-  host.appendChild(renderDailyAnalysis(r));
+  renderTodayOverview(r, weekly);
+  host.appendChild(renderTodayInsights(r, weekly));
+  updateDashboardKPIs(r, weekly);
 }
 
-// 当日记录列表（编辑/删除）
+// 当日记录使用与每周分析一致的纵向时间轴；点击时间块可编辑或删除记录。
 async function renderTodayEntries() {
   const entries = await api('GET', '/api/time-entries?date=' + todayStr());
   const host = $('#today-entries');
   host.innerHTML = '';
   if (entries.length === 0) { host.appendChild(emptyHint('当天没有工时记录')); return; }
-  for (const e of entries) host.appendChild(buildEntryRow(e, async () => {
-    await refreshActiveEntry();
-    renderRecorder();
-    await renderTodayTimelineAnalysis();
-    await renderTodayEntries();
-  }));
+  const seconds = entries.reduce((sum, e) => {
+    const start = new Date(e.start_time.replace(' ', 'T')).getTime();
+    const end = e.end_time ? new Date(e.end_time.replace(' ', 'T')).getTime() : Date.now();
+    return sum + Math.max(0, (end - start) / 1000);
+  }, 0);
+  host.appendChild(buildWeekTimeline([{
+    date: todayStr(), weekday: '今日', seconds, duration: tutilFormatDuration(seconds),
+  }], entries, '24h'));
 }
 
-// 任务与分组：分组 chips + 按分组展示任务
+// 今日看板只展示当天明确加入的任务；若仅子任务被加入，保留其父级以显示层级。
 function renderTodayTasks() {
-  $('#today-show-done').checked = state.todayShowDone;
-
   const filterTree = (todos) => todos.flatMap(t => {
     const children = filterTree(t.children || []);
-    if (!state.todayShowDone && t.status === 'done' && children.length === 0) return [];
+    const matchesTag = !state.todayTaskTag || (t.tag_ids || []).includes(Number(state.todayTaskTag));
+    const isToday = (t.tag_ids || []).includes(tagIDByName('进行中'));
+    if ((!isToday || !matchesTag) && children.length === 0) return [];
     return [{ ...t, children }];
   });
-  const countTree = (todos) => {
-    const counts = { pending: 0, done: 0 };
-    const walk = (items) => {
-      for (const t of items) {
-        counts[t.status === 'done' ? 'done' : 'pending'] += 1;
-        walk(t.children || []);
-      }
-    };
-    walk(todos);
-    return counts;
-  };
-
-  const buckets = state.groups.map(group => ({
-    id: group.id,
-    name: group.name,
-    color: group.color,
-    source: state.todos.filter(t => t.group_id === group.id),
-  }));
-  buckets.push({
-    id: null,
-    name: '未分组',
-    color: '#9ca3af',
-    source: state.todos.filter(t => !t.group_id),
-  });
-
-  const startGroupTimer = (groupId) => {
-    setTodayMode('timer');
-    $('#timer-group').value = groupId == null ? '' : String(groupId);
-    fillTodoSelect($('#timer-todo'), null, groupId == null ? '' : groupId);
-    $('#timer-todo').value = '';
-    $('#timer-note').focus();
-  };
-
-  const chips = $('#today-groups');
-  chips.innerHTML = '';
-  for (const bucket of buckets.filter(b => b.id != null)) {
-    const counts = countTree(bucket.source);
-    chips.appendChild(el('button', {
-      class: 'group-chip',
-      type: 'button',
-      title: `切换到“${bucket.name}”分组计时`,
-      onclick: () => startGroupTimer(bucket.id),
-    },
-    el('i', { style: `background:${bucket.color}` }),
-    el('span', {}, bucket.name),
-    el('span', { class: 'group-chip-count' }, String(counts.pending))));
-  }
-
+  const filter = $('#today-task-filter');
+  filter.innerHTML = '<option value="">全部标签</option>';
+  for (const tag of state.groups) filter.appendChild(el('option', { value: tag.id }, tag.name));
+  filter.value = state.todayTaskTag;
   const host = $('#today-tasks');
   host.innerHTML = '';
-  const visibleBuckets = buckets
-    .map(bucket => ({ ...bucket, items: filterTree(bucket.source) }))
-    .filter(bucket => bucket.items.length > 0);
+  const items = filterTree(state.todos);
+  const activeItems = items.filter(t => t.status !== 'done');
+  const doneItems = items.filter(t => t.status === 'done');
 
-  if (visibleBuckets.length === 0) {
-    host.appendChild(emptyHint(state.todayShowDone ? '暂无任务，点右上角新建' : '今天的任务已全部完成'));
+  if (items.length === 0) {
+    host.appendChild(emptyHint('暂无今日任务，请在待办中将任务加入今日'));
     return;
   }
-
-  for (const bucket of visibleBuckets) {
-    const counts = countTree(bucket.source);
-    const card = el('section', { class: 'today-task-group' });
-    const head = el('div', { class: 'task-group-head' },
-      el('i', { style: `background:${bucket.color}` }),
-      el('strong', {}, bucket.name),
-      el('span', { class: 'task-group-count' }, `${counts.pending} 待办${counts.done ? ` · ${counts.done} 完成` : ''}`),
-      el('button', {
-        class: 'btn btn-small task-group-timer',
-        type: 'button',
-        onclick: () => startGroupTimer(bucket.id),
-      }, '计时'));
-    card.appendChild(head);
-    const list = el('div', { class: 'today-task-list' });
-    for (const t of bucket.items) list.appendChild(buildTodoRow(t, false));
-    card.appendChild(list);
-    host.appendChild(card);
+  for (const t of activeItems) host.appendChild(buildTodoRow(t, false));
+  if (doneItems.length) {
+    const completed = el('details', { class: 'today-completed' }, el('summary', {}, `已完成任务 (${doneItems.length})`));
+    for (const t of doneItems) completed.appendChild(buildTodoRow(t, false));
+    host.appendChild(completed);
   }
+}
+
+async function startTimerForTodo(todo) {
+  if (state.activeEntry && String(state.activeEntry.todo_id) === String(todo.id)) {
+    await onTimerToggle();
+    return;
+  }
+  if (state.activeEntry) {
+    alert('已有进行中的计时，请先停止后再开始新的任务。');
+    return;
+  }
+  setTodayMode('timer');
+  // A quick-start task should always be selectable, even when a tag filter
+  // from an earlier selection is still active.
+  $('#timer-group').value = '';
+  fillTodoSelect($('#timer-todo'), todo.id, null);
+  $('#timer-todo').value = String(todo.id);
+  $('#timer-note').value = '';
+  await onTimerToggle();
+}
+
+async function toggleTodoToday(todo) {
+  const progressID = await ensureTag('进行中', '#3b82f6');
+  const isToday = (todo.tag_ids || []).includes(progressID);
+  const tagIDs = isToday ? todo.tag_ids.filter(id => id !== progressID) : [...(todo.tag_ids || []), progressID];
+  try {
+    await api('PUT', '/api/todos/' + todo.id, {
+      title: todo.title,
+      description: todo.description,
+      status: todo.status,
+      priority: todo.priority,
+      due_date: todo.due_date,
+      parent_id: todo.parent_id,
+      tag_ids: tagIDs,
+    });
+    await loadTodos();
+    renderTodos();
+  } catch (e) { alert(e.message); }
+}
+
+function countTodoTree(todos, predicate = () => true) {
+  return todos.reduce((count, todo) => count + (predicate(todo) ? 1 : 0) + countTodoTree(todo.children || [], predicate), 0);
+}
+
+function renderTodayOverview(r) {
+  const host = $('#today-overview');
+  host.innerHTML = '';
+  const totalTasks = countTodoTree(state.todos);
+  const doneTasks = countTodoTree(state.todos, t => t.status === 'done');
+  const activeTasks = countTodoTree(state.todos, t => t.status === 'in_progress');
+  const completion = totalTasks ? Math.round(doneTasks / totalTasks * 100) : 0;
+  const grid = el('div', { class: 'overview-grid' });
+  [['总工时', r.total_duration], ['任务', `${doneTasks}/${totalTasks}`], ['完成率', completion + '%'], ['对比昨日', r.vs_yesterday ? (r.vs_yesterday.delta_seconds >= 0 ? '+' : '') + r.vs_yesterday.duration : '—'], ['最长专注', r.longest_focus ? r.longest_focus.duration : '—'], ['进行中', String(activeTasks)]]
+    .forEach(([label, value]) => grid.appendChild(el('div', { class: 'overview-stat' }, el('div', { class: 'label' }, label), el('div', { class: 'value' }, value))));
+  host.appendChild(grid);
+  host.appendChild(el('div', { class: 'overview-section' }, el('h4', {}, '标签分布'), buildPieChart(r.group_breakdown)));
+}
+
+function renderTodayInsights(r, weekly) {
+  const wrap = el('div', {});
+  wrap.appendChild(el('div', { class: 'overview-section' }, el('h4', {}, '任务时间分布'), buildPieChart(r.todo_breakdown)));
+  wrap.appendChild(el('div', { class: 'overview-section' }, el('h4', {}, '本周趋势'), buildTrendChart(weekly.daily_trend || [])));
+  return wrap;
+}
+
+function updateDashboardKPIs(r, weekly) {
+  const total = countTodoTree(state.todos);
+  const done = countTodoTree(state.todos, t => t.status === 'done');
+  const active = countTodoTree(state.todos, t => t.status === 'in_progress');
+  const score = total ? Math.round(done / total * 60 + Math.min(40, r.total_seconds / 3600 * 10)) : 0;
+  $('#kpi-date').textContent = todayStr().slice(5);
+  $('#kpi-hours').textContent = r.total_duration;
+  // These optional KPI slots exist in older page layouts. The current header
+  // only shows date and work duration, so don't fail rendering when absent.
+  const activeKPI = $('#kpi-active');
+  const doneKPI = $('#kpi-done');
+  const scoreKPI = $('#kpi-score');
+  if (activeKPI) activeKPI.textContent = active;
+  if (doneKPI) doneKPI.textContent = done;
+  if (scoreKPI) scoreKPI.textContent = score + ' 分';
+  $('#footer-score').textContent = score + ' 分';
+  $('#footer-week-hours').textContent = weekly.total_duration || '0m';
+  $('#footer-streak').textContent = r.total_seconds > 0 ? '1' : '0';
 }
 
 // ============================================================
 //  TODOS
 // ============================================================
 function bindTodos() {
-  $('#add-group-btn').addEventListener('click', () => toggleGroupEditor(null));
+  $('#add-group-btn').addEventListener('click', () => openGroupModal(null));
   $('#save-group-btn').addEventListener('click', saveGroup);
   $('#cancel-group-btn').addEventListener('click', () => $('#group-editor').classList.add('hidden'));
   $('#add-todo-btn').addEventListener('click', () => openTodoModal(null));
@@ -472,37 +592,39 @@ function renderTodos() {
   ul.innerHTML = '';
   const all = el('li', {
     class: 'group-item' + (state.currentGroup === '' ? ' active' : ''),
-    onclick: () => { state.currentGroup = ''; renderTodos(); },
+    onclick: () => { state.currentGroup = ''; state.todoTagIDs = []; state.todoExcludedTagIDs = []; renderTodos(); },
   }, el('span', { class: 'dot', style: 'background:#9ca3af' }), '全部');
   ul.appendChild(all);
   for (const g of state.groups) {
     const li = el('li', {
       class: 'group-item' + (state.currentGroup == String(g.id) ? ' active' : ''),
-      onclick: () => { state.currentGroup = String(g.id); renderTodos(); },
+      onclick: () => { state.currentGroup = String(g.id); state.todoTagIDs = [g.id]; state.todoExcludedTagIDs = []; renderTodos(); },
     });
     li.appendChild(el('span', { class: 'dot', style: `background:${g.color}` }));
     li.appendChild(document.createTextNode(g.name));
     const actions = el('span', { class: 'g-actions' });
-    actions.appendChild(el('button', { class: 'btn btn-small', onclick: (e) => { e.stopPropagation(); toggleGroupEditor(g); } }, '改'));
-    actions.appendChild(el('button', { class: 'btn btn-small btn-danger', onclick: async (e) => { e.stopPropagation(); if (confirm('删除分组？其下待办将变为未分组')) { await api('DELETE', '/api/groups/' + g.id); state.currentGroup=''; await loadGroups(); await loadTodos(); renderTodos(); } } }, '×'));
+    actions.appendChild(el('button', { class: 'btn btn-small', onclick: (e) => { e.stopPropagation(); openGroupModal(g); } }, '改'));
+    actions.appendChild(el('button', { class: 'btn btn-small btn-danger', onclick: async (e) => { e.stopPropagation(); if (confirm('删除标签？关联任务将移除该标签')) { await api('DELETE', '/api/tags/' + g.id); state.currentGroup=''; state.todoTagIDs = state.todoTagIDs.filter(id => id !== g.id); state.todoExcludedTagIDs = state.todoExcludedTagIDs.filter(id => id !== g.id); await loadGroups(); await loadTodos(); renderTodos(); } } }, '×'));
     li.appendChild(actions);
     ul.appendChild(li);
   }
 
   // Filter & sort bar
-  const titleText = state.currentGroup ? groupName(Number(state.currentGroup)) : '全部待办';
+  const titleText = state.todoTagIDs.length ? '标签筛选' : '全部待办';
   $('#todos-title').innerHTML = '';
   $('#todos-title').appendChild(document.createTextNode(titleText));
   $('#todos-title').appendChild(buildTodoFilterBar());
+  const tagFilter = $('#todo-tag-filter');
+  tagFilter.innerHTML = '';
+  tagFilter.appendChild(buildTodoTagFilter());
 
   const list = $('#todo-list');
   list.innerHTML = '';
-  let filtered = state.currentGroup
-    ? state.todos.filter(t => t.group_id === Number(state.currentGroup))
-    : state.todos;
+  let filtered = filterTodoTreeByTags(state.todos);
 
   // Apply status filter
-  if (state.todoFilter === 'pending') filtered = filtered.filter(t => t.status !== 'done');
+  if (state.todoFilter === 'today') filtered = filtered.filter(t => (t.tag_ids || []).includes(tagIDByName('进行中')));
+  else if (state.todoFilter === 'pending') filtered = filtered.filter(t => t.status !== 'done');
   else if (state.todoFilter === 'done') filtered = filtered.filter(t => t.status === 'done');
 
   // Apply sort by created_at
@@ -515,11 +637,77 @@ function renderTodos() {
   for (const t of filtered) list.appendChild(buildTodoRow(t, false));
 }
 
+function todoMatchesTagFilter(todo) {
+  const selected = state.todoTagIDs;
+  const excluded = state.todoExcludedTagIDs;
+  const tags = todo.tag_ids || [];
+  if (excluded.some(id => tags.includes(id))) return false;
+  if (selected.length === 0) return true;
+  return state.todoTagRule === 'and'
+    ? selected.every(id => tags.includes(id))
+    : selected.some(id => tags.includes(id));
+}
+
+// Keep a matching subtask visible even when only it (rather than its parent)
+// has the selected tag. This matters for subtasks that add tags of their own.
+function filterTodoTreeByTags(todos) {
+  return todos.reduce((result, todo) => {
+    const children = filterTodoTreeByTags(todo.children || []);
+    if (todoMatchesTagFilter(todo)) {
+      result.push(todo);
+    } else if (children.length) {
+      result.push({ ...todo, children });
+    }
+    return result;
+  }, []);
+}
+
+function buildTodoTagFilter() {
+  const wrap = el('div', { class: 'todo-tag-filter' });
+  wrap.appendChild(el('span', { class: 'todo-tag-filter-label' }, '标签筛选'));
+
+  const rule = el('div', { class: 'seg', 'aria-label': '多标签筛选规则' });
+  for (const option of [{ key: 'or', label: '任一标签 (OR)' }, { key: 'and', label: '全部标签 (AND)' }]) {
+    rule.appendChild(el('button', {
+      class: 'seg-btn' + (state.todoTagRule === option.key ? ' active' : ''),
+      onclick: () => { state.todoTagRule = option.key; renderTodos(); },
+    }, option.label));
+  }
+  wrap.appendChild(rule);
+
+  const tags = el('div', { class: 'todo-tag-options', 'aria-label': '选择标签' });
+  for (const tag of state.groups) {
+    const selected = state.todoTagIDs.includes(tag.id);
+    const excluded = state.todoExcludedTagIDs.includes(tag.id);
+    tags.appendChild(el('button', {
+      class: 'todo-tag-option' + (selected ? ' active' : '') + (excluded ? ' excluded' : ''),
+      title: tag.description || '',
+      onclick: () => {
+        // Click cycles: include → exclude (NOT) → unselected.
+        if (!selected && !excluded) state.todoTagIDs = [...state.todoTagIDs, tag.id];
+        else if (selected) { state.todoTagIDs = state.todoTagIDs.filter(id => id !== tag.id); state.todoExcludedTagIDs = [...state.todoExcludedTagIDs, tag.id]; }
+        else state.todoExcludedTagIDs = state.todoExcludedTagIDs.filter(id => id !== tag.id);
+        state.currentGroup = state.todoTagIDs.length === 1 ? String(state.todoTagIDs[0]) : '';
+        renderTodos();
+      },
+    }, el('i', { style: `background:${tag.color}` }), tag.name));
+  }
+  wrap.appendChild(tags);
+  if (state.todoTagIDs.length || state.todoExcludedTagIDs.length) {
+    wrap.appendChild(el('button', {
+      class: 'btn btn-small',
+      onclick: () => { state.todoTagIDs = []; state.todoExcludedTagIDs = []; state.currentGroup = ''; renderTodos(); },
+    }, '清除标签'));
+  }
+  return wrap;
+}
+
 function buildTodoFilterBar() {
   const bar = el('span', { class: 'todo-filter-bar' });
   // Filter buttons
   const filters = [
     { key: 'all', label: '全部' },
+    { key: 'today', label: '进行中' },
     { key: 'pending', label: '待办' },
     { key: 'done', label: '已完成' },
   ];
@@ -548,6 +736,7 @@ function buildTodoFilterBar() {
 
 function buildTodoRow(t, compact) {
   const item = el('div', { class: 'todo-item' + (t.status === 'done' ? ' done' : '') });
+  if (state.view === 'today' && !t.parent_id) bindTodayTaskDrag(item, t);
   const row = el('div', { class: 'todo-row' });
   const check = el('div', {
     class: 'todo-check' + (t.status === 'done' ? ' done' : ''),
@@ -566,13 +755,25 @@ function buildTodoRow(t, compact) {
     toggleInlineAnalysis(t, item);
   });
   main.appendChild(titleEl);
+  if (state.activeEntry && String(state.activeEntry.todo_id) === String(t.id)) {
+    main.appendChild(el('span', { class: 'task-elapsed', 'data-task-elapsed': t.id }, '计时中 ' + formatElapsedSeconds(activeElapsedSeconds())));
+  }
   const meta = el('div', { class: 'todo-meta' });
-  if (t.group_id) meta.appendChild(el('span', { class: 'group-tag' }, el('i', { style: `background:${groupColor(t.group_id)}` }), groupName(t.group_id)));
+  for (const tag of (t.tags || [])) {
+    meta.appendChild(el('span', { class: 'group-tag', title: tag.description || '' }, el('i', { style: `background:${tag.color}` }), tag.name));
+  }
   if (t.due_date) meta.appendChild(document.createTextNode(' · 截止 ' + t.due_date));
   main.appendChild(meta);
   row.appendChild(main);
   const actions = el('div', { class: 'todo-actions' });
   if (!compact) {
+    if (state.view === 'today') {
+      const isActive = state.activeEntry && String(state.activeEntry.todo_id) === String(t.id);
+      actions.appendChild(el('button', { class: 'btn btn-small ' + (isActive ? 'btn-danger' : 'btn-primary'), onclick: () => startTimerForTodo(t) }, isActive ? '结束' : '计时'));
+    } else {
+      const isToday = (t.tag_ids || []).includes(tagIDByName('进行中'));
+      actions.appendChild(el('button', { class: 'btn btn-small ' + (isToday ? 'btn-primary' : ''), onclick: () => toggleTodoToday(t) }, isToday ? '移出进行中' : '加入进行中'));
+    }
     actions.appendChild(el('button', { class: 'btn btn-small', onclick: () => openTodoModal({ parent_id: t.id }) }, '子任务'));
     actions.appendChild(el('button', { class: 'btn btn-small', onclick: () => openTodoModal(t) }, '编辑'));
     actions.appendChild(el('button', { class: 'btn btn-small btn-danger', onclick: async () => { if (confirm('删除该待办及其子任务？')) { await api('DELETE', '/api/todos/' + t.id); await loadTodos(); renderView(state.view); } } }, '删除'));
@@ -585,6 +786,28 @@ function buildTodoRow(t, compact) {
     item.appendChild(childWrap);
   }
   return item;
+}
+
+function activeElapsedSeconds() {
+  return state.activeEntry ? Math.max(0, Math.floor((Date.now() - new Date(state.activeEntry.start_time.replace(' ', 'T')).getTime()) / 1000)) : 0;
+}
+function formatElapsedSeconds(secs) {
+  return String(Math.floor(secs / 3600)).padStart(2, '0') + ':' + String(Math.floor(secs % 3600 / 60)).padStart(2, '0') + ':' + String(secs % 60).padStart(2, '0');
+}
+function bindTodayTaskDrag(item, todo) {
+  item.draggable = true;
+  item.addEventListener('dragstart', e => { item.classList.add('dragging'); e.dataTransfer.setData('text/plain', String(todo.id)); });
+  item.addEventListener('dragend', () => item.classList.remove('dragging'));
+  item.addEventListener('dragover', e => e.preventDefault());
+  item.addEventListener('drop', async e => {
+    e.preventDefault();
+    const from = state.todos.findIndex(x => String(x.id) === e.dataTransfer.getData('text/plain'));
+    const to = state.todos.findIndex(x => x.id === todo.id);
+    if (from < 0 || to < 0 || from === to) return;
+    const [moved] = state.todos.splice(from, 1); state.todos.splice(to, 0, moved);
+    await Promise.all(state.todos.map((task, index) => api('PUT', '/api/todos/' + task.id, { title: task.title, description: task.description, status: task.status, priority: state.todos.length - index, due_date: task.due_date, parent_id: task.parent_id, tag_ids: task.tag_ids })));
+    await loadTodos(); renderTodayTasks();
+  });
 }
 
 // ---- Inline Todo Analysis (below todo item) ----
@@ -775,8 +998,8 @@ async function saveGroup() {
   const id = $('#save-group-btn').dataset.id;
   const body = { name: $('#group-name').value.trim(), color: $('#group-color').value, sort_order: 0 };
   if (!body.name) return;
-  if (id) await api('PUT', '/api/groups/' + id, body);
-  else await api('POST', '/api/groups', body);
+  if (id) await api('PUT', '/api/tags/' + id, body);
+  else await api('POST', '/api/tags', body);
   $('#group-editor').classList.add('hidden');
   await loadGroups();
   renderTodos();
@@ -799,14 +1022,9 @@ function buildTimeline(entries, showNow, viewDate, zoom) {
 // portion overlapping that day (cross-midnight entries show on both days).
 function buildTimelineTrack(entries, showNow, viewDate, zoom) {
   const host = el('div', { class: 'timeline-host' });
-  if (!entries || entries.length === 0) {
-    host.appendChild(el('div', { class: 'tl-empty', style: 'width:100%' }, '暂无记录'));
-    return host;
-  }
   // Determine visible range
   const z = zoom || '12h';
-  const rangeStart = z === '12h' ? 9 : 0;
-  const rangeEnd = z === '12h' ? 21 : 24;
+  const { start: rangeStart, end: rangeEnd } = timelineRange(z);
   const rangeSecs = (rangeEnd - rangeStart) * 3600;
 
   // Use the viewing date for dayStart calculation, not each entry's own date.
@@ -814,31 +1032,87 @@ function buildTimelineTrack(entries, showNow, viewDate, zoom) {
   const dayStart = new Date(dateStr + 'T00:00:00').getTime();
   const rangeStartMs = dayStart + rangeStart * 3600 * 1000;
   const rangeEndMs = dayStart + rangeEnd * 3600 * 1000;
-  for (const e of entries) {
+  if (!entries || entries.length === 0) {
+    host.appendChild(el('div', { class: 'tl-empty', style: 'width:100%' }, '暂无记录'));
+  }
+  for (const e of entries || []) {
     const start = new Date(e.start_time.replace(' ', 'T')).getTime();
+    const isActive = !e.end_time;
     const endSecs = e.end_time ? new Date(e.end_time.replace(' ', 'T')).getTime() : Date.now();
     const s = Math.max(start, rangeStartMs);
     const en = Math.min(endSecs, rangeEndMs);
-    if (en <= s) continue;
+    // Keep an active block in the DOM even before it enters the visible range:
+    // updateTimelineNow will make it appear as soon as its current endpoint does.
+    if (en <= s && !(isActive && start < rangeEndMs)) continue;
     const leftPct = ((s - rangeStartMs) / (rangeSecs * 1000)) * 100;
-    const widthPct = ((en - s) / (rangeSecs * 1000)) * 100;
+    const widthPct = Math.max(0, ((en - s) / (rangeSecs * 1000)) * 100);
     const block = el('div', {
       class: 'tl-block',
-      style: `left:${leftPct}%; width:${widthPct}%; background:${groupColor(e.group_id)}`,
-      title: `${fmtTime(e.start_time)} - ${e.end_time ? fmtTime(e.end_time) : '进行中'} · ${groupName(e.group_id)}${e.todo_title ? ' · ' + e.todo_title : ''}`,
+      style: `left:${leftPct}%; width:${widthPct}%; background:${entryColor(e)}`,
+      title: `${fmtTime(e.start_time)} - ${e.end_time ? fmtTime(e.end_time) : '进行中'} · ${groupName(e.tag_id)}${e.todo_title ? ' · ' + e.todo_title : ''}`,
     });
-    if (widthPct > 6) block.textContent = groupName(e.group_id);
+    if (isActive) {
+      block.dataset.timelineActiveBlock = 'true';
+      block.dataset.timelineLayout = 'horizontal';
+      block.dataset.entryStartMs = String(start);
+      block.dataset.rangeStartMs = String(rangeStartMs);
+      block.dataset.rangeEndMs = String(rangeEndMs);
+    }
+    block.textContent = entryTitle(e);
     block.addEventListener('click', () => openEntryModal(e));
     host.appendChild(block);
   }
   if (showNow) {
-    const now = Date.now();
-    if (now >= rangeStartMs && now <= rangeEndMs) {
-      const pct = ((now - rangeStartMs) / (rangeSecs * 1000)) * 100;
-      host.appendChild(el('div', { class: 'tl-now', style: `left:${pct}%` }));
-    }
+    host.dataset.nowTrack = 'true';
+    host.dataset.rangeStartMs = String(rangeStartMs);
+    host.dataset.rangeEndMs = String(rangeEndMs);
+    host.appendChild(el('div', { class: 'tl-now', 'data-timeline-now': 'true' }));
+    updateTimelineNow(host);
   }
   return host;
+}
+
+// Keeps the red "now" line moving even when no timer is running. Tracks carry
+// their own visible time range so the line can be hidden outside it.
+function updateTimelineNow(track) {
+  const tracks = track ? [track] : $$('[data-now-track="true"]');
+  const now = Date.now();
+  for (const host of tracks) {
+    const start = Number(host.dataset.rangeStartMs);
+    const end = Number(host.dataset.rangeEndMs);
+    const line = $('[data-timeline-now="true"]', host);
+    if (!line || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+    const visible = now >= start && now <= end;
+    line.style.display = visible ? '' : 'none';
+    if (visible) line.style.left = `${(now - start) / (end - start) * 100}%`;
+  }
+  for (const col of $$('[data-week-now-track="true"]')) {
+    const start = Number(col.dataset.rangeStartMs);
+    const end = Number(col.dataset.rangeEndMs);
+    const line = $('[data-timeline-now="true"]', col);
+    if (!line || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+    const visible = now >= start && now <= end;
+    line.style.display = visible ? '' : 'none';
+    if (visible) line.style.setProperty('--top-h', ((now - start) / 3600000).toFixed(3));
+  }
+  for (const block of $$('[data-timeline-active-block="true"]')) {
+    const entryStart = Number(block.dataset.entryStartMs);
+    const rangeStart = Number(block.dataset.rangeStartMs);
+    const rangeEnd = Number(block.dataset.rangeEndMs);
+    if (![entryStart, rangeStart, rangeEnd].every(Number.isFinite) || rangeEnd <= rangeStart) continue;
+    const start = Math.max(entryStart, rangeStart);
+    const end = Math.min(now, rangeEnd);
+    const visible = end > start;
+    block.style.display = visible ? '' : 'none';
+    if (!visible) continue;
+    if (block.dataset.timelineLayout === 'vertical') {
+      block.style.setProperty('--top-h', ((start - rangeStart) / 3600000).toFixed(3));
+      block.style.setProperty('--h-h', ((end - start) / 3600000).toFixed(3));
+    } else {
+      block.style.left = `${(start - rangeStart) / (rangeEnd - rangeStart) * 100}%`;
+      block.style.width = `${(end - start) / (rangeEnd - rangeStart) * 100}%`;
+    }
+  }
 }
 function buildAxis(zoom) {
   const z = zoom || '12h';
@@ -863,11 +1137,10 @@ function buildEntryRow(e, onChange) {
   else timeDiv.appendChild(el('span', { class: 'entry-running' }, '进行中'));
   row.appendChild(timeDiv);
   row.appendChild(el('div', { class: 'entry-dur' }, dur));
-  row.appendChild(el('div', { class: 'entry-group' }, el('i', { style: `background:${groupColor(e.group_id)}` }), groupName(e.group_id)));
-  row.appendChild(el('div', { class: 'entry-note' }, e.todo_title ? '#' + e.todo_title : '', e.note ? ' · ' + e.note : ''));
+  row.appendChild(el('div', { class: 'entry-task' }, e.todo_title || '未关联任务'));
+  if (e.note) row.appendChild(el('div', { class: 'entry-note' }, '· ' + e.note));
   row.appendChild(el('div', { class: 'entry-actions' },
-    el('button', { class: 'btn btn-small', onclick: () => openEntryModal(e) }, '编辑'),
-    el('button', { class: 'btn btn-small btn-danger', onclick: async () => { if (confirm('删除该工时记录？')) { await api('DELETE', '/api/time-entries/' + e.id); if (onChange) onChange(); } } }, '删除')));
+    el('button', { class: 'btn btn-small', onclick: () => openEntryModal(e) }, '编辑')));
   return row;
 }
 
@@ -966,7 +1239,7 @@ async function renderAnalysis() {
         el('h3', {}, state.analysisDate + ' 时间轴'),
         el('div', { class: 'seg' },
           el('button', { class: 'seg-btn' + (state.timelineZoom === '24h' ? ' active' : ''), onclick: () => { state.timelineZoom = '24h'; renderAnalysis(); } }, '全天'),
-          el('button', { class: 'seg-btn' + (state.timelineZoom === '12h' ? ' active' : ''), onclick: () => { state.timelineZoom = '12h'; renderAnalysis(); } }, '9-21'),
+          el('button', { class: 'seg-btn' + (state.timelineZoom === '12h' ? ' active' : ''), onclick: () => { state.timelineZoom = '12h'; renderAnalysis(); } }, '工作时段'),
         ));
       tlCard.appendChild(tlHead);
       tlCard.appendChild(buildTimeline(entries, state.analysisDate === todayStr(), state.analysisDate, state.timelineZoom));
@@ -976,7 +1249,11 @@ async function renderAnalysis() {
       const w = state.analysisWeek || currentISOWeek();
       state.analysisWeek = w;
       $('#analysis-week').value = w;
-      const r = await api('GET', '/api/analysis/weekly?week=' + w);
+      const [r, summary] = await Promise.all([
+        api('GET', '/api/analysis/weekly?week=' + w),
+        api('GET', '/api/summaries/weekly?week=' + w),
+      ]);
+      r.user_summary = summary.content;
       host.appendChild(renderWeeklyAnalysis(r));
     }
   } catch (e) {
@@ -1011,14 +1288,16 @@ function renderDailyAnalysis(r) {
   flexRow.appendChild(leftGrid);
 
   flexRow.appendChild(el('div', { class: 'card', style: 'flex:1; margin-left:16px' },
-    el('h3', {}, '分组占比'),
+    el('h3', {}, '任务占比'),
+    buildPieChart(r.todo_breakdown)));
+  flexRow.appendChild(el('div', { class: 'card', style: 'flex:1; margin-left:16px' },
+    el('h3', {}, '标签占比'),
     buildPieChart(r.group_breakdown)));
 
   wrap.appendChild(flexRow);
 
 
-  // improvement editor
-  wrap.appendChild(buildImprovementEditor(r.date, r.improvement, r.notes));
+  wrap.appendChild(buildDailySummaryEditor(r.date, r.content));
   return wrap;
 }
 
@@ -1036,14 +1315,20 @@ function renderWeeklyAnalysis(r) {
   }
   wrap.appendChild(grid);
 
-  // 7-day parallel timeline: one horizontal track per weekday.
+  // Keep the hourly timeline immediately after the per-day bar chart so the
+  // aggregate and the underlying time distribution can be read together.
+  wrap.appendChild(el('div', { class: 'card', style: 'margin-top:16px' },
+    el('h3', {}, '每日趋势'),
+    buildTrendChart(r.daily_trend)));
+
+  // 7-day timeline: one column per weekday, with hourly grid lines.
   const tlCard = el('div', { class: 'card', style: 'margin-top:16px' });
   tlCard.appendChild(el('div', { class: 'panel-head', style: 'justify-content:space-between' },
     el('h3', {}, '本周时间轴 · 7天'),
     el('div', { style: 'display:flex;gap:8px' },
       el('div', { class: 'seg' },
         el('button', { class: 'seg-btn' + (state.timelineZoom === '24h' ? ' active' : ''), onclick: () => { state.timelineZoom = '24h'; renderAnalysis(); } }, '全天'),
-        el('button', { class: 'seg-btn' + (state.timelineZoom === '12h' ? ' active' : ''), onclick: () => { state.timelineZoom = '12h'; renderAnalysis(); } }, '9-21'),
+        el('button', { class: 'seg-btn' + (state.timelineZoom === '12h' ? ' active' : ''), onclick: () => { state.timelineZoom = '12h'; renderAnalysis(); } }, '工作时段'),
       ),
       el('div', { class: 'seg', title: '缩放时间轴' },
         el('button', { class: 'seg-btn week-cal-zoom-out', title: '缩小', disabled: state.weekHourPx <= 32 ? true : null, onclick: () => setWeekZoom(state.weekHourPx - 16) }, '－'),
@@ -1053,12 +1338,14 @@ function renderWeeklyAnalysis(r) {
   tlCard.appendChild(buildWeekTimeline(r.daily_trend, r.weekly_entries, state.timelineZoom));
   wrap.appendChild(tlCard);
 
-  wrap.appendChild(el('div', { class: 'card', style: 'margin-top:16px' },
-    el('h3', {}, '每日趋势'),
-    buildTrendChart(r.daily_trend)));
-  wrap.appendChild(el('div', { class: 'card', style: 'margin-top:16px' },
-    el('h3', {}, '分组占比'),
-    buildPieChart(r.group_breakdown)));
+  const breakdowns = el('div', { class: 'analysis-flex-row', style: 'margin-top:16px' });
+  breakdowns.appendChild(el('div', { class: 'card', style: 'flex:1' },
+    el('h3', {}, '任务占比'), buildPieChart(r.todo_breakdown)));
+  breakdowns.appendChild(el('div', { class: 'card', style: 'flex:1; margin-left:16px' },
+    el('h3', {}, '标签占比'), buildPieChart(r.group_breakdown)));
+  wrap.appendChild(breakdowns);
+  // Keep the editable reflection as the final section of weekly analysis.
+  wrap.appendChild(buildWeeklySummaryEditor(r.week_label, r.user_summary));
   return wrap;
 }
 
@@ -1074,6 +1361,12 @@ function barsFromParts(parts) {
 }
 function buildPieChart(groups) {
   const wrap = el('div', { class: 'pie-chart-wrap' });
+  // Both task and tag API breakdowns share the chart renderer.
+  groups = (groups || []).map(g => ({
+    ...g,
+    group_name: g.group_name || g.todo_name,
+    group_color: g.group_color || g.todo_color || '#9ca3af',
+  }));
   if (!groups || groups.length === 0 || groups.every(g => g.seconds < 1)) {
     wrap.appendChild(emptyHint('无数据'));
     return wrap;
@@ -1218,18 +1511,23 @@ function buildHourBars(bins) {
 }
 function buildTrendChart(days) {
   const wrap = el('div', {});
-  const chart = el('div', { class: 'trend-chart' });
+  const maxSeconds = Math.max(1, ...days.map(d => d.seconds));
+  const maxHours = Math.max(1, Math.ceil(maxSeconds / 3600));
+  const axis = el('div', { class: 'trend-y-axis' });
+  for (let hour = maxHours; hour >= 0; hour--) {
+    axis.appendChild(el('span', { style: `bottom:${(hour / maxHours) * 100}%` }, hour + 'h'));
+  }
+  const chart = el('div', { class: 'trend-chart', style: `--trend-hours:${maxHours}` });
   const labels = el('div', { class: 'trend-labels' });
-  const max = Math.max(1, ...days.map(d => d.seconds));
   for (const d of days) {
     const col = el('div', { class: 'trend-col' });
-    const bar = el('div', { class: 'trend-bar', style: `height:${Math.max(2, (d.seconds / max) * 100)}%`, title: d.date + ' ' + d.duration });
+    const bar = el('div', { class: 'trend-bar', style: `height:${Math.max(2, (d.seconds / (maxHours * 3600)) * 100)}%`, title: d.date + ' ' + d.duration });
     col.appendChild(bar);
     chart.appendChild(col);
     labels.appendChild(el('span', {}, d.weekday));
   }
-  wrap.appendChild(chart);
-  wrap.appendChild(labels);
+  wrap.appendChild(el('div', { class: 'trend-body' }, axis, chart));
+  wrap.appendChild(el('div', { class: 'trend-footer' }, el('span', { class: 'trend-y-axis-spacer' }), labels));
   return wrap;
 }
 
@@ -1243,8 +1541,7 @@ function buildTrendChart(days) {
 // no scroll jump. Wheel scrolling is native (overflow-y: auto).
 function buildWeekTimeline(trend, entries, zoom) {
   const z = zoom || '12h';
-  const rangeStart = z === '12h' ? 9 : 0;
-  const rangeEnd = z === '12h' ? 21 : 24;
+  const { start: rangeStart, end: rangeEnd } = timelineRange(z);
   const totalHours = rangeEnd - rangeStart;
   const today = todayStr();
   const hasEntries = entries && entries.length > 0;
@@ -1280,34 +1577,55 @@ function buildWeekTimeline(trend, entries, zoom) {
     if (hasEntries) {
       for (const e of entries) {
         const start = new Date(e.start_time.replace(' ', 'T')).getTime();
+        const isActive = !e.end_time;
         const endSecs = e.end_time ? new Date(e.end_time.replace(' ', 'T')).getTime() : Date.now();
         const s = Math.max(start, rangeStartMs);
         const en = Math.min(endSecs, rangeEndMs);
-        if (en <= s) continue;
+        if (en <= s && !(isActive && start < rangeEndMs)) continue;
         const topH = (s - rangeStartMs) / 3600000;
-        const heightH = (en - s) / 3600000;
+        const heightH = Math.max(0, (en - s) / 3600000);
         const block = el('div', {
           class: 'week-cal-block',
-          style: `--top-h:${topH.toFixed(3)};--h-h:${heightH.toFixed(3)};background:${groupColor(e.group_id)}`,
-          title: `${fmtTime(e.start_time)} - ${e.end_time ? fmtTime(e.end_time) : '进行中'} · ${groupName(e.group_id)}${e.todo_title ? ' · ' + e.todo_title : ''}`,
+          style: `--top-h:${topH.toFixed(3)};--h-h:${heightH.toFixed(3)};background:${entryColor(e)}`,
+          title: `${fmtTime(e.start_time)} - ${e.end_time ? fmtTime(e.end_time) : '进行中'} · ${groupName(e.tag_id)}${e.todo_title ? ' · ' + e.todo_title : ''}`,
         });
-        block.textContent = groupName(e.group_id);
+        if (isActive) {
+          block.dataset.timelineActiveBlock = 'true';
+          block.dataset.timelineLayout = 'vertical';
+          block.dataset.entryStartMs = String(start);
+          block.dataset.rangeStartMs = String(rangeStartMs);
+          block.dataset.rangeEndMs = String(rangeEndMs);
+        }
+        block.textContent = entryTitle(e);
         block.addEventListener('click', () => openEntryModal(e));
         col.appendChild(block);
       }
     }
     if (isToday) {
+      col.dataset.weekNowTrack = 'true';
+      col.dataset.rangeStartMs = String(rangeStartMs);
+      col.dataset.rangeEndMs = String(rangeEndMs);
       const now = Date.now();
       if (now >= rangeStartMs && now <= rangeEndMs) {
         const nowH = (now - rangeStartMs) / 3600000;
-        col.appendChild(el('div', { class: 'week-cal-now', style: `--top-h:${nowH.toFixed(3)}` }));
+        col.appendChild(el('div', { class: 'week-cal-now', 'data-timeline-now': 'true', style: `--top-h:${nowH.toFixed(3)}` }));
       }
     }
     inner.appendChild(col);
   }
   scroll.appendChild(inner);
 
-  const wrap = el('div', { class: 'week-cal', style: `--hour-px:${state.weekHourPx}px;--hours:${totalHours}` });
+  // The single-day timeline always shows the full day and opens around 10:00,
+  // where most work records begin, while keeping native scrolling available.
+  setTimeout(() => {
+    if (trend.length === 1) {
+      const now = new Date();
+      const nowHour = now.getHours() + now.getMinutes() / 60;
+      scroll.scrollTop = Math.max(0, (nowHour - rangeStart) * state.weekHourPx - scroll.clientHeight / 2);
+    }
+  }, 0);
+
+  const wrap = el('div', { class: 'week-cal' + (trend.length === 1 ? ' week-cal-single-day' : ''), style: `--hour-px:${state.weekHourPx}px;--hours:${totalHours}` });
   wrap.appendChild(head);
   wrap.appendChild(scroll);
   return wrap;
@@ -1325,21 +1643,34 @@ function setWeekZoom(px) {
   if (outBtn) outBtn.disabled = state.weekHourPx <= 32;
 }
 
-function buildImprovementEditor(date, improvement, notes) {
+function buildDailySummaryEditor(date, content) {
   const card = el('div', { class: 'card improvement-box', style: 'margin-top:16px' });
-  card.appendChild(el('h3', {}, '每日提升 / 反思'));
-  card.appendChild(el('label', {}, '今日提升（记录成长与收获）'));
-  const imp = el('textarea', { id: 'imp-improvement' }); imp.value = improvement || '';
-  card.appendChild(imp);
-  card.appendChild(el('label', {}, '其他备注'));
-  const note = el('textarea', { id: 'imp-notes' }); note.value = notes || '';
-  card.appendChild(note);
+  card.appendChild(el('h3', {}, '当日总结'));
+  card.appendChild(el('label', {}, '总结内容'));
+  const input = el('textarea', { id: 'daily-summary', placeholder: '写下当日总结…' }); input.value = content || '';
+  card.appendChild(input);
   card.appendChild(el('div', { class: 'save-row' },
     el('button', { class: 'btn btn-primary', onclick: async () => {
       try {
-        await api('PUT', '/api/summaries/daily?date=' + date, { improvement: imp.value, notes: note.value });
+        await api('PUT', '/api/summaries/daily?date=' + date, { content: input.value });
         alert('已保存');
         renderAnalysis();
+      } catch (e) { alert(e.message); }
+    } }, '保存')));
+  return card;
+}
+
+function buildWeeklySummaryEditor(week, content) {
+  const card = el('div', { class: 'card improvement-box', style: 'margin:16px 0' });
+  card.appendChild(el('h3', {}, '本周总结'));
+  card.appendChild(el('label', {}, '记录本周成果、问题与下周计划'));
+  const input = el('textarea', { id: 'weekly-summary', placeholder: '写下本周总结…' }); input.value = content || '';
+  card.appendChild(input);
+  card.appendChild(el('div', { class: 'save-row' },
+    el('button', { class: 'btn btn-primary', onclick: async () => {
+      try {
+        await api('PUT', '/api/summaries/weekly?week=' + week, { content: input.value });
+        alert('已保存');
       } catch (e) { alert(e.message); }
     } }, '保存')));
   return card;
@@ -1364,16 +1695,23 @@ function openTodoModal(t) {
   const isChild = t && t.parent_id;
   const isNew = !t || !(t.id);
   const titleField = field('标题', input('text', t && t.title ? t.title : ''));
-  const groupField = field('分组', groupSelect(t && t.group_id ? t.group_id : (isChild ? null : Number(state.currentGroup) || null)));
+  const parent = isChild ? findTodoById(t.parent_id) : null;
+  const initialTagIDs = t && t.tag_ids ? t.tag_ids : (parent ? parent.tag_ids : (state.currentGroup ? [Number(state.currentGroup)] : []));
+  const tagsField = field('标签（第一个用于时间轴颜色）', tagSelector(initialTagIDs));
   const descField = field('描述', textarea(t && t.description ? t.description : ''));
   const prioField = field('优先级', input('number', t && t.priority != null ? t.priority : 0));
   const dueField = field('截止日期', input('date', t && t.due_date ? t.due_date : ''));
+  const initiallyToday = t ? (t.tag_ids || []).includes(tagIDByName('进行中')) : state.view === 'today';
+  const todayCheck = el('input', { type: 'checkbox' });
+  todayCheck.checked = initiallyToday;
+  const todayField = el('label', { class: 'today-task-check' }, todayCheck, ' 添加“进行中”标签');
   const form = el('div', {});
   form.appendChild(el('div', { class: 'field' }, el('label', {}, isNew ? (isChild ? '新建子任务' : '新建待办') : '编辑待办')));
   form.appendChild(titleField);
-  if (!isChild) form.appendChild(groupField);
+  form.appendChild(tagsField);
   form.appendChild(descField);
   form.appendChild(el('div', { class: 'row' }, prioField, dueField));
+  form.appendChild(todayField);
   form.appendChild(el('div', { class: 'save-row' },
     el('button', { class: 'btn btn-primary', onclick: async () => {
       const body = {
@@ -1381,8 +1719,13 @@ function openTodoModal(t) {
         description: descField.querySelector('textarea').value,
         priority: Number(prioField.querySelector('input').value || 0),
         due_date: dueField.querySelector('input').value || null,
+        status: t && t.status ? t.status : 'pending',
       };
-      if (!isChild && groupField.querySelector('select').value) body.group_id = Number(groupField.querySelector('select').value);
+      body.tag_ids = tagsField.querySelector('.tag-selector').getTagIDs();
+      const progressID = await ensureTag('进行中', '#3b82f6');
+      body.tag_ids = todayCheck.checked
+        ? (body.tag_ids.includes(progressID) ? body.tag_ids : [...body.tag_ids, progressID])
+        : body.tag_ids.filter(id => id !== progressID);
       if (isChild) body.parent_id = t.parent_id;
       try {
         if (isNew) await api('POST', '/api/todos', body);
@@ -1401,7 +1744,7 @@ function openEntryModal(e, defaultDate) {
   const endDate = e && e.end_time ? e.end_time.slice(0, 10) : startDate;
   const startTime = e ? e.start_time.slice(11, 16) : '09:00';
   const endTime = e && e.end_time ? e.end_time.slice(11, 16) : '';
-  const initialGroupId = e && e.group_id ? e.group_id : Number(state.currentGroup) || null;
+  const initialGroupId = e && e.tag_id ? e.tag_id : Number(state.currentGroup) || null;
   const initialTodoId = e && e.todo_id ? e.todo_id : null;
 
   const startDateField = field('开始日期', input('date', startDate));
@@ -1409,12 +1752,27 @@ function openEntryModal(e, defaultDate) {
   const endDateField = field('结束日期', input('date', endDate));
   const endTimeField = field('结束时间', input('time', endTime));
 
-  // Build group select
+  // Build tag and task selectors. The selected task's tags remain visible.
   const gs = groupSelect(initialGroupId);
-  const todoWrapper = el('div', { class: 'field' }, el('label', {}, '关联待办（可选）'));
+  const todoWrapper = el('div', { class: 'field entry-task-field' }, el('label', {}, '关联任务（可选）'));
   function buildTodoField(groupId) {
-    todoWrapper.querySelectorAll('select').forEach(s => s.remove());
-    todoWrapper.appendChild(todoSelect(initialTodoId, groupId));
+    todoWrapper.querySelectorAll('.entry-task-control').forEach(n => n.remove());
+    const control = el('div', { class: 'entry-task-control' });
+    const select = todoSelect(initialTodoId, groupId);
+    const meta = el('div', { class: 'entry-task-tags' });
+    const renderTaskMeta = () => {
+      meta.innerHTML = '';
+      const todo = findTodoById(select.value ? Number(select.value) : null);
+      if (!todo) { meta.appendChild(el('span', { class: 'entry-task-empty' }, '选择任务后显示其标签')); return; }
+      for (const tag of (todo.tags || [])) {
+        meta.appendChild(el('span', { class: 'group-tag' }, el('i', { style: `background:${tag.color}` }), tag.name));
+      }
+      meta.appendChild(el('button', { type: 'button', class: 'btn btn-small', onclick: () => openTodoModal(todo) }, '编辑任务'));
+    };
+    select.addEventListener('change', renderTaskMeta);
+    control.append(select, meta);
+    todoWrapper.appendChild(control);
+    renderTaskMeta();
   }
   buildTodoField(initialGroupId);
   gs.addEventListener('change', function () {
@@ -1422,15 +1780,30 @@ function openEntryModal(e, defaultDate) {
     buildTodoField(gid);
   });
 
-  const noteField = field('备注', input('text', e && e.note ? e.note : ''));
-  const form = el('div', {});
-  form.appendChild(el('div', { class: 'row' }, startDateField, startTimeField));
-  form.appendChild(el('div', { class: 'row' }, endDateField, endTimeField));
-  form.appendChild(el('div', { class: 'field' }, el('label', {}, '分组'), gs));
-  form.appendChild(todoWrapper);
+  const noteInput = textarea(e && e.note ? e.note : '');
+  noteInput.rows = 3;
+  noteInput.classList.add('entry-note-input');
+  const noteField = field('备注', noteInput);
+  const form = el('div', { class: 'entry-editor' });
+  form.appendChild(el('div', { class: 'entry-editor-section' }, el('div', { class: 'entry-editor-section-title' }, '时间'),
+    el('div', { class: 'row' }, startDateField, startTimeField),
+    el('div', { class: 'row' }, endDateField, endTimeField)));
+  form.appendChild(el('div', { class: 'entry-editor-section' }, el('div', { class: 'entry-editor-section-title' }, '任务与标签'),
+    el('div', { class: 'field' }, el('label', {}, '记录标签'), gs), todoWrapper));
   form.appendChild(noteField);
-  form.appendChild(el('div', { class: 'save-row' },
-    el('button', { class: 'btn btn-primary', onclick: async () => {
+  const actions = el('div', { class: 'save-row' });
+  if (!isNew) {
+    actions.appendChild(el('button', { class: 'btn btn-danger', onclick: async () => {
+      if (!confirm('删除这条工时记录？此操作不会删除关联任务。')) return;
+      try {
+        await api('DELETE', '/api/time-entries/' + e.id);
+        closeModal();
+        await refreshActiveEntry();
+        renderView(state.view);
+      } catch (err) { alert(err.message); }
+    } }, '删除记录'));
+  }
+  actions.appendChild(el('button', { class: 'btn btn-primary', onclick: async () => {
       const sd = startDateField.querySelector('input').value;
       const st = startTimeField.querySelector('input').value;
       const ed = endDateField.querySelector('input').value;
@@ -1442,8 +1815,8 @@ function openEntryModal(e, defaultDate) {
       const body = {
         start_time: startDt,
         end_time: endDt,
-        note: noteField.querySelector('input').value,
-        group_id: gs.value ? Number(gs.value) : null,
+        note: noteField.querySelector('textarea').value,
+        tag_id: gs.value ? Number(gs.value) : null,
         todo_id: todoWrapper.querySelector('select').value ? Number(todoWrapper.querySelector('select').value) : null,
       };
       try {
@@ -1453,7 +1826,8 @@ function openEntryModal(e, defaultDate) {
         await refreshActiveEntry();
         renderView(state.view);
       } catch (err) { alert(err.message); }
-    } }, '保存')));
+    } }, '保存'));
+  form.appendChild(actions);
   openModal(isNew ? '补录工时' : '编辑工时', form);
 }
 
@@ -1461,26 +1835,61 @@ function openEntryModal(e, defaultDate) {
 function openGroupModal(group) {
   const isNew = !group;
   const nameField = field('分组名', input('text', group ? group.name : ''));
+  const descriptionField = field('标签描述', textarea(group ? group.description || '' : ''));
   const colorI = el('input', { class: 'color-input', type: 'color', value: group ? group.color : '#6366f1' });
   const colorField = el('div', { class: 'field' }, el('label', {}, '颜色'), colorI);
+  const statsCheck = el('input', { type: 'checkbox' });
+  statsCheck.checked = !group || group.include_in_stats !== false;
+  const statsField = el('label', { class: 'today-task-check' }, statsCheck, ' 计入标签分布统计');
   const form = el('div', {});
-  form.appendChild(el('div', { class: 'field' }, el('label', {}, isNew ? '新建分组' : '编辑分组')));
+  form.appendChild(el('div', { class: 'field' }, el('label', {}, isNew ? '新建标签' : '编辑标签')));
   form.appendChild(nameField);
+  form.appendChild(descriptionField);
   form.appendChild(colorField);
+  form.appendChild(statsField);
   form.appendChild(el('div', { class: 'save-row' },
     el('button', { class: 'btn btn-primary', onclick: async () => {
       const name = nameField.querySelector('input').value.trim();
       if (!name) return;
-      const body = { name, color: colorI.value, sort_order: 0 };
+      const body = { name, description: descriptionField.querySelector('textarea').value.trim(), color: colorI.value, include_in_stats: statsCheck.checked };
       try {
-        if (isNew) await api('POST', '/api/groups', body);
-        else await api('PUT', '/api/groups/' + group.id, body);
+        if (isNew) await api('POST', '/api/tags', body);
+        else await api('PUT', '/api/tags/' + group.id, body);
         closeModal();
         await loadGroups();
         if (state.view === 'today') renderToday(); else renderView(state.view);
       } catch (e) { alert(e.message); }
     } }, '保存')));
-  openModal(isNew ? '新建分组' : '编辑分组', form);
+  openModal(isNew ? '新建标签' : '编辑标签', form);
+}
+
+function tagSelector(selectedIDs) {
+  let selected = Array.from(new Set(selectedIDs || []));
+  const wrap = el('div', { class: 'tag-selector' });
+  const selectedWrap = el('div', { class: 'selected-tags' });
+  const select = el('select', { class: 'select tag-add-select', 'aria-label': '添加标签' });
+  const render = () => {
+    selectedWrap.innerHTML = '';
+    selected.forEach((id, index) => {
+      const tag = state.groups.find(x => x.id === id);
+      if (!tag) return;
+      selectedWrap.appendChild(el('span', { class: 'group-tag', title: tag.description || '' },
+        el('i', { style: `background:${tag.color}` }), tag.name,
+        el('button', { type: 'button', class: 'tag-move', title: '上移标签', disabled: index === 0 ? true : null, onclick: () => { [selected[index - 1], selected[index]] = [selected[index], selected[index - 1]]; render(); } }, '↑'),
+        el('button', { type: 'button', class: 'tag-move', title: '下移标签', disabled: index === selected.length - 1 ? true : null, onclick: () => { [selected[index], selected[index + 1]] = [selected[index + 1], selected[index]]; render(); } }, '↓'),
+        el('button', { type: 'button', class: 'tag-remove', title: `移除 ${tag.name}`, onclick: () => { selected = selected.filter(x => x !== id); render(); } }, '×')));
+    });
+    select.innerHTML = '';
+    select.appendChild(el('option', { value: '' }, '添加标签…'));
+    for (const tag of state.groups.filter(x => !selected.includes(x.id))) {
+      select.appendChild(el('option', { value: tag.id }, tag.name));
+    }
+  };
+  select.addEventListener('change', () => { if (select.value) { selected.push(Number(select.value)); render(); } });
+  wrap.getTagIDs = () => [...selected];
+  wrap.append(selectedWrap, select);
+  render();
+  return wrap;
 }
 
 function field(labelText, control) {
@@ -1518,14 +1927,15 @@ function todoSelect(selectedId, groupId) {
   function walk(todos, depth, parentGroupId) {
     for (const t of todos) {
       if (t.status === 'done') continue;
-      const effectiveGroupId = t.parent_id ? (parentGroupId ?? t.group_id) : t.group_id;
+      const effectiveGroupId = t.parent_id ? (parentGroupId ?? (t.tag_ids || [])[0]) : (t.tag_ids || [])[0];
+      const tagIDs = t.tag_ids || (effectiveGroupId ? [effectiveGroupId] : []);
       if (groupId != null) {
-        if (effectiveGroupId !== groupId && effectiveGroupId != null) continue;
+        if (!tagIDs.includes(groupId)) continue;
       }
       const indent = depth > 0 ? '  '.repeat(depth) + '└ ' : '';
       flatList.push({ id: t.id, label: indent + t.title });
       if (t.children && t.children.length) {
-        walk(t.children, depth + 1, t.group_id);
+        walk(t.children, depth + 1, (t.tag_ids || [])[0]);
       }
     }
   }

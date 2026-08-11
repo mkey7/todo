@@ -7,10 +7,10 @@ import (
 	"todo/internal/models"
 )
 
-// ListGroups returns all groups ordered by sort_order then id.
+// ListGroups returns all tags ordered by id.
 func ListGroups(db *sql.DB) ([]models.Group, error) {
-	rows, err := db.Query(`SELECT id, name, color, sort_order, created_at
-		FROM groups ORDER BY sort_order ASC, id ASC`)
+	rows, err := db.Query(`SELECT id, name, description, color, include_in_stats, created_at
+		FROM tags ORDER BY id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -19,9 +19,11 @@ func ListGroups(db *sql.DB) ([]models.Group, error) {
 	var gs []models.Group
 	for rows.Next() {
 		var g models.Group
-		if err := rows.Scan(&g.ID, &g.Name, &g.Color, &g.SortOrder, &g.CreatedAt); err != nil {
+		var include bool
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.Color, &include, &g.CreatedAt); err != nil {
 			return nil, err
 		}
+		g.IncludeInStats = &include
 		gs = append(gs, g)
 	}
 	return gs, rows.Err()
@@ -30,9 +32,11 @@ func ListGroups(db *sql.DB) ([]models.Group, error) {
 // GetGroup fetches a single group by id.
 func GetGroup(db *sql.DB, id int64) (models.Group, error) {
 	var g models.Group
-	err := db.QueryRow(`SELECT id, name, color, sort_order, created_at
-		FROM groups WHERE id = ?`, id).
-		Scan(&g.ID, &g.Name, &g.Color, &g.SortOrder, &g.CreatedAt)
+	var include bool
+	err := db.QueryRow(`SELECT id, name, description, color, include_in_stats, created_at
+		FROM tags WHERE id = ?`, id).
+		Scan(&g.ID, &g.Name, &g.Description, &g.Color, &include, &g.CreatedAt)
+	g.IncludeInStats = &include
 	return g, err
 }
 
@@ -44,8 +48,11 @@ func CreateGroup(db *sql.DB, g models.Group) (models.Group, error) {
 	if g.Color == "" {
 		g.Color = "#6b7280"
 	}
-	res, err := db.Exec(`INSERT INTO groups (name, color, sort_order) VALUES (?, ?, ?)`,
-		g.Name, g.Color, g.SortOrder)
+	include := true
+	if g.IncludeInStats != nil {
+		include = *g.IncludeInStats
+	}
+	res, err := db.Exec(`INSERT INTO tags (name, description, color, include_in_stats) VALUES (?, ?, ?, ?)`, g.Name, g.Description, g.Color, include)
 	if err != nil {
 		return models.Group{}, err
 	}
@@ -56,10 +63,19 @@ func CreateGroup(db *sql.DB, g models.Group) (models.Group, error) {
 	return GetGroup(db, id)
 }
 
-// UpdateGroup updates name/color/sort_order for the given id.
+// UpdateGroup updates a tag's editable fields.
 func UpdateGroup(db *sql.DB, id int64, g models.Group) (models.Group, error) {
-	if _, err := db.Exec(`UPDATE groups SET name = ?, color = ?, sort_order = ? WHERE id = ?`,
-		g.Name, g.Color, g.SortOrder, id); err != nil {
+	if g.Name == "" {
+		return models.Group{}, fmt.Errorf("name is required")
+	}
+	if g.IncludeInStats == nil {
+		existing, err := GetGroup(db, id)
+		if err != nil {
+			return models.Group{}, err
+		}
+		g.IncludeInStats = existing.IncludeInStats
+	}
+	if _, err := db.Exec(`UPDATE tags SET name = ?, description = ?, color = ?, include_in_stats = ? WHERE id = ?`, g.Name, g.Description, g.Color, *g.IncludeInStats, id); err != nil {
 		return models.Group{}, err
 	}
 	return GetGroup(db, id)
@@ -68,6 +84,6 @@ func UpdateGroup(db *sql.DB, id int64, g models.Group) (models.Group, error) {
 // DeleteGroup removes a group. Todos/time_entries referencing it get NULL
 // (via ON DELETE SET NULL).
 func DeleteGroup(db *sql.DB, id int64) error {
-	_, err := db.Exec(`DELETE FROM groups WHERE id = ?`, id)
+	_, err := db.Exec(`DELETE FROM tags WHERE id = ?`, id)
 	return err
 }
