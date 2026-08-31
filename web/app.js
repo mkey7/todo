@@ -19,6 +19,10 @@ const el = (tag, attrs = {}, ...children) => {
   return n;
 };
 const fmtTime = (s) => s ? s.slice(11, 19) : '--';
+const currentTime = () => {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
 const todayStr = () => {
   const d = new Date();
   const y = d.getFullYear();
@@ -198,6 +202,7 @@ function bindToday() {
     const gid = $('#bf-group').value ? Number($('#bf-group').value) : null;
     fillTodoSelect($('#bf-todo'), null, gid);
   });
+  $('#bf-end').addEventListener('click', () => { $('#bf-start').value = ''; });
   // 补录
   $('#bf-add').addEventListener('click', onBackfillAdd);
   // 任务与分组
@@ -358,10 +363,12 @@ async function onTimerToggle() {
 // 补录模式：手动配置起止时间
 async function onBackfillAdd() {
   const sd = $('#bf-date').value || todayStr();
-  const st = $('#bf-start').value;
+  const startInput = $('#bf-start');
+  const autoFilledStart = !startInput.value;
+  if (autoFilledStart) startInput.value = currentTime();
+  const st = startInput.value;
   const ed = $('#bf-end-date').value || sd;
   const en = $('#bf-end').value;
-  if (!st) { alert('请填写开始时间'); return; }
   const startDt = `${sd} ${st}:00`;
   const endDt = en ? `${ed} ${en}:00` : null;
   if (endDt && endDt <= startDt) { alert('结束时间必须晚于开始时间'); return; }
@@ -377,6 +384,7 @@ async function onBackfillAdd() {
     await api('POST', '/api/time-entries', body);
     $('#bf-note').value = '';
     $('#bf-end').value = '';
+    if (autoFilledStart) startInput.value = '';
     await refreshActiveEntry();
     renderRecorder();
     await renderTodayTimelineAnalysis();
