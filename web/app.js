@@ -50,7 +50,6 @@ const state = {
   analysisScope: 'daily',
   analysisDate: todayStr(),
   analysisWeek: '',
-  todayMode: 'timer',      // 'timer' | 'backfill'
   todayShowDone: false,    // 任务列表是否显示已完成
   todayTaskTag: '',
   timelineZoom: '12h',     // '24h' | configured work range
@@ -193,20 +192,8 @@ async function refreshActiveEntry() {
 //  TODAY
 // ============================================================
 function bindToday() {
-  // 计时 / 补录 模式切换
-  $('#today-mode-seg').addEventListener('click', e => {
-    const b = e.target.closest('.seg-btn');
-    if (!b) return;
-    setTodayMode(b.dataset.mode);
-  });
-  // 计时
-  $('#timer-toggle').addEventListener('click', onTimerToggle);
   $('#nav-active-timer-stop').addEventListener('click', onTimerToggle);
   // 标签只用于筛选；实际记录优先由选中的任务决定。
-  $('#timer-group').addEventListener('change', () => {
-    const gid = $('#timer-group').value ? Number($('#timer-group').value) : null;
-    fillTodoSelect($('#timer-todo'), null, gid);
-  });
   $('#bf-group').addEventListener('change', () => {
     const gid = $('#bf-group').value ? Number($('#bf-group').value) : null;
     fillTodoSelect($('#bf-todo'), null, gid);
@@ -227,17 +214,6 @@ function bindToday() {
   });
 }
 
-function setTodayMode(mode) {
-  state.todayMode = mode;
-  $$('#today-mode-seg .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
-  $('#today-timer-body').classList.toggle('hidden', mode !== 'timer');
-  $('#today-backfill-body').classList.toggle('hidden', mode !== 'backfill');
-  if (mode === 'backfill' && !$('#bf-date').value) {
-    $('#bf-date').value = todayStr();
-    $('#bf-end-date').value = todayStr();
-  }
-}
-
 async function renderToday() {
   // Refresh source data before calculating the overview; never render it
   // from a stale todo list or an old active-timer snapshot.
@@ -248,11 +224,11 @@ async function renderToday() {
   await renderTodayEntries();
 }
 
-// 填充计时/补录两套下拉 + 计时器显示
+// 填充补录任务下拉
 function renderRecorder() {
-  fillGroupSelect($('#timer-group'), null);
-  fillTodoSelect($('#timer-todo'), null, $('#timer-group').value ? Number($('#timer-group').value) : null);
-  fillGroupSelect($('#bf-group'), null);
+  const progressID = tagIDByName('进行中');
+  fillGroupSelect($('#bf-group'), progressID);
+  $('#bf-group').value = progressID ? String(progressID) : '';
   fillTodoSelect($('#bf-todo'), null, $('#bf-group').value ? Number($('#bf-group').value) : null);
   if (!$('#bf-date').value) { $('#bf-date').value = todayStr(); $('#bf-end-date').value = todayStr(); }
   renderTimer();
@@ -277,7 +253,6 @@ function fillTodoSelect(sel, selectedId, groupId) {
   const flatList = [];
   function walk(todos, depth, parentGroupId) {
     for (const t of todos) {
-      if (t.status === 'done') continue;
       // For sub-tasks, use the parent's group_id for filtering
       const effectiveGroupId = t.parent_id ? (parentGroupId ?? (t.tag_ids || [])[0]) : (t.tag_ids || [])[0];
       const tagIDs = t.tag_ids || (effectiveGroupId ? [effectiveGroupId] : []);
@@ -319,24 +294,6 @@ function findTodoById(id) {
 }
 
 function renderTimer() {
-  const active = state.activeEntry;
-  const btn = $('#timer-toggle');
-  if (active) {
-    btn.textContent = '结束计时';
-    btn.classList.add('btn-danger');
-    const info = $('#timer-active-info');
-    info.innerHTML = '';
-    info.appendChild(document.createTextNode('正在计时：'));
-    info.appendChild(el('b', {}, active.todo_title || groupName(active.tag_id)));
-    if (active.todo_title && active.tag_id) info.appendChild(document.createTextNode(' · ' + groupName(active.tag_id)));
-    if (active.note) info.appendChild(document.createTextNode(' · ' + active.note));
-    updateElapsed();
-  } else {
-    btn.textContent = '开始计时';
-    btn.classList.remove('btn-danger');
-    $('#timer-active-info').textContent = '';
-    $('#timer-elapsed').textContent = '--:--:--';
-  }
   renderNavTimer();
 }
 function renderNavTimer() {
@@ -356,7 +313,8 @@ function updateElapsed() {
   const h = String(Math.floor(secs / 3600)).padStart(2, '0');
   const m = String(Math.floor((secs % 3600) / 60)).padStart(2, '0');
   const s = String(secs % 60).padStart(2, '0');
-  $('#timer-elapsed').textContent = `${h}:${m}:${s}`;
+  const timerElapsed = $('#timer-elapsed');
+  if (timerElapsed) timerElapsed.textContent = `${h}:${m}:${s}`;
   const navElapsed = $('#nav-active-timer-elapsed');
   if (navElapsed) navElapsed.textContent = `${h}:${m}:${s}`;
   $$('[data-task-elapsed]').forEach(node => { node.textContent = '计时中 ' + `${h}:${m}:${s}`; });
@@ -462,13 +420,12 @@ async function renderTodayEntries() {
   }], entries, '24h'));
 }
 
-// 今日看板只展示当天明确加入的任务；若仅子任务被加入，保留其父级以显示层级。
+// 今日看板按所选标签展示任务；若仅子任务匹配，保留其父级以显示层级。
 function renderTodayTasks() {
   const filterTree = (todos) => todos.flatMap(t => {
     const children = filterTree(t.children || []);
     const matchesTag = !state.todayTaskTag || (t.tag_ids || []).includes(Number(state.todayTaskTag));
-    const isToday = (t.tag_ids || []).includes(tagIDByName('进行中'));
-    if ((!isToday || !matchesTag) && children.length === 0) return [];
+    if (!matchesTag && children.length === 0) return [];
     return [{ ...t, children }];
   });
   const filter = $('#today-task-filter');
@@ -482,7 +439,7 @@ function renderTodayTasks() {
   const doneItems = items.filter(t => t.status === 'done');
 
   if (items.length === 0) {
-    host.appendChild(emptyHint('暂无今日任务，请在待办中将任务加入今日'));
+    host.appendChild(emptyHint('暂无匹配标签的任务'));
     return;
   }
   for (const t of activeItems) host.appendChild(buildTodoRow(t, false));
@@ -491,25 +448,6 @@ function renderTodayTasks() {
     for (const t of doneItems) completed.appendChild(buildTodoRow(t, false));
     host.appendChild(completed);
   }
-}
-
-async function startTimerForTodo(todo) {
-  if (state.activeEntry && String(state.activeEntry.todo_id) === String(todo.id)) {
-    await onTimerToggle();
-    return;
-  }
-  if (state.activeEntry) {
-    alert('已有进行中的计时，请先停止后再开始新的任务。');
-    return;
-  }
-  setTodayMode('timer');
-  // A quick-start task should always be selectable, even when a tag filter
-  // from an earlier selection is still active.
-  $('#timer-group').value = '';
-  fillTodoSelect($('#timer-todo'), todo.id, null);
-  $('#timer-todo').value = String(todo.id);
-  $('#timer-note').value = '';
-  await onTimerToggle();
 }
 
 async function toggleTodoToday(todo) {
@@ -610,7 +548,7 @@ function renderTodos() {
   }
 
   // Filter & sort bar
-  const titleText = state.todoTagIDs.length ? '标签筛选' : '全部待办';
+  const titleText = state.todoTagIDs.length ? '标签筛选' : '全部任务';
   $('#todos-title').innerHTML = '';
   $('#todos-title').appendChild(document.createTextNode(titleText));
   $('#todos-title').appendChild(buildTodoFilterBar());
@@ -633,7 +571,7 @@ function renderTodos() {
     return state.todoSort === 'newest' ? cmp : -cmp;
   });
 
-  if (filtered.length === 0) { list.appendChild(emptyHint('没有待办，点右上角新建')); return; }
+  if (filtered.length === 0) { list.appendChild(emptyHint('没有任务，点击右上角新建')); return; }
   for (const t of filtered) list.appendChild(buildTodoRow(t, false));
 }
 
@@ -708,7 +646,7 @@ function buildTodoFilterBar() {
   const filters = [
     { key: 'all', label: '全部' },
     { key: 'today', label: '进行中' },
-    { key: 'pending', label: '待办' },
+    { key: 'pending', label: '未开始' },
     { key: 'done', label: '已完成' },
   ];
   for (const f of filters) {
@@ -755,7 +693,7 @@ function buildTodoRow(t, compact) {
     toggleInlineAnalysis(t, item);
   });
   main.appendChild(titleEl);
-  if (state.activeEntry && String(state.activeEntry.todo_id) === String(t.id)) {
+  if (state.view !== 'today' && state.activeEntry && String(state.activeEntry.todo_id) === String(t.id)) {
     main.appendChild(el('span', { class: 'task-elapsed', 'data-task-elapsed': t.id }, '计时中 ' + formatElapsedSeconds(activeElapsedSeconds())));
   }
   const meta = el('div', { class: 'todo-meta' });
@@ -767,16 +705,13 @@ function buildTodoRow(t, compact) {
   row.appendChild(main);
   const actions = el('div', { class: 'todo-actions' });
   if (!compact) {
-    if (state.view === 'today') {
-      const isActive = state.activeEntry && String(state.activeEntry.todo_id) === String(t.id);
-      actions.appendChild(el('button', { class: 'btn btn-small ' + (isActive ? 'btn-danger' : 'btn-primary'), onclick: () => startTimerForTodo(t) }, isActive ? '结束' : '计时'));
-    } else {
+    if (state.view !== 'today') {
       const isToday = (t.tag_ids || []).includes(tagIDByName('进行中'));
       actions.appendChild(el('button', { class: 'btn btn-small ' + (isToday ? 'btn-primary' : ''), onclick: () => toggleTodoToday(t) }, isToday ? '移出进行中' : '加入进行中'));
     }
     actions.appendChild(el('button', { class: 'btn btn-small', onclick: () => openTodoModal({ parent_id: t.id }) }, '子任务'));
     actions.appendChild(el('button', { class: 'btn btn-small', onclick: () => openTodoModal(t) }, '编辑'));
-    actions.appendChild(el('button', { class: 'btn btn-small btn-danger', onclick: async () => { if (confirm('删除该待办及其子任务？')) { await api('DELETE', '/api/todos/' + t.id); await loadTodos(); renderView(state.view); } } }, '删除'));
+    actions.appendChild(el('button', { class: 'btn btn-small btn-danger', onclick: async () => { if (confirm('删除该任务及其子任务？')) { await api('DELETE', '/api/todos/' + t.id); await loadTodos(); renderView(state.view); } } }, '删除'));
   }
   row.appendChild(actions);
   item.appendChild(row);
@@ -871,7 +806,7 @@ async function renderInlineAnalysis(t, container) {
     }
 
     if (allEntries.length === 0) {
-      container.appendChild(emptyHint('该待办暂没有时间记录'));
+      container.appendChild(emptyHint('该任务暂没有时间记录'));
       return;
     }
     container.appendChild(el('h4', { style: 'margin-top:16px' }, '时间记录列表'));
@@ -982,7 +917,7 @@ function fmtDurationSecs(secs) {
 }
 
 function statusLabel(s) {
-  return s === 'done' ? '已完成' : s === 'in_progress' ? '进行中' : '待办';
+  return s === 'done' ? '已完成' : s === 'in_progress' ? '进行中' : '未开始';
 }
 
 // ---- 分组编辑 ----
@@ -1706,7 +1641,7 @@ function openTodoModal(t) {
   todayCheck.checked = initiallyToday;
   const todayField = el('label', { class: 'today-task-check' }, todayCheck, ' 添加“进行中”标签');
   const form = el('div', {});
-  form.appendChild(el('div', { class: 'field' }, el('label', {}, isNew ? (isChild ? '新建子任务' : '新建待办') : '编辑待办')));
+  form.appendChild(el('div', { class: 'field' }, el('label', {}, isNew ? (isChild ? '新建子任务' : '新建任务') : '编辑任务')));
   form.appendChild(titleField);
   form.appendChild(tagsField);
   form.appendChild(descField);
@@ -1723,8 +1658,9 @@ function openTodoModal(t) {
       };
       body.tag_ids = tagsField.querySelector('.tag-selector').getTagIDs();
       const progressID = await ensureTag('进行中', '#3b82f6');
+      const completedID = tagIDByName('已完成');
       body.tag_ids = todayCheck.checked
-        ? (body.tag_ids.includes(progressID) ? body.tag_ids : [...body.tag_ids, progressID])
+        ? [...body.tag_ids.filter(id => id !== completedID), ...(body.tag_ids.includes(progressID) ? [] : [progressID])]
         : body.tag_ids.filter(id => id !== progressID);
       if (isChild) body.parent_id = t.parent_id;
       try {
@@ -1735,7 +1671,7 @@ function openTodoModal(t) {
         renderView(state.view);
       } catch (e) { alert(e.message); }
     } }, '保存')));
-  openModal(isNew ? (isChild ? '新建子任务' : '新建待办') : '编辑待办', form);
+  openModal(isNew ? (isChild ? '新建子任务' : '新建任务') : '编辑任务', form);
 }
 
 function openEntryModal(e, defaultDate) {
@@ -1831,7 +1767,7 @@ function openEntryModal(e, defaultDate) {
   openModal(isNew ? '补录工时' : '编辑工时', form);
 }
 
-// 新建/编辑分组弹窗（今日页与待办页共用入口，独立 DOM，不依赖 #group-editor）
+// 新建/编辑标签弹窗（今日页与任务页共用入口，独立 DOM，不依赖 #group-editor）
 function openGroupModal(group) {
   const isNew = !group;
   const nameField = field('分组名', input('text', group ? group.name : ''));
@@ -1885,7 +1821,17 @@ function tagSelector(selectedIDs) {
       select.appendChild(el('option', { value: tag.id }, tag.name));
     }
   };
-  select.addEventListener('change', () => { if (select.value) { selected.push(Number(select.value)); render(); } });
+  select.addEventListener('change', () => {
+    if (!select.value) return;
+    const id = Number(select.value);
+    const tag = state.groups.find(x => x.id === id);
+    selected = selected.filter(x => {
+      const other = state.groups.find(t => t.id === x);
+      return !(tag && other && ((tag.name === '进行中' && other.name === '已完成') || (tag.name === '已完成' && other.name === '进行中')));
+    });
+    selected.push(id);
+    render();
+  });
   wrap.getTagIDs = () => [...selected];
   wrap.append(selectedWrap, select);
   render();

@@ -134,6 +134,44 @@ func TestCompletedTodoGetsAutomaticCompletedTag(t *testing.T) {
 	}
 }
 
+func TestStatusTagsAreMutuallyExclusive(t *testing.T) {
+	d := newTestDB(t)
+	work, _ := CreateGroup(d, models.Group{Name: "工作", Color: "#6366f1"})
+	progress, _ := CreateGroup(d, models.Group{Name: progressTagName, Color: "#3b82f6"})
+	completed, _ := CreateGroup(d, models.Group{Name: completedTagName, Color: "#22c55e"})
+	todo, err := CreateTodo(d, models.Todo{Title: "互斥", TagIDs: []int64{work.ID, progress.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := UpdateTodo(d, todo.ID, models.Todo{Title: todo.Title, Status: todo.Status, TagIDs: []int64{work.ID, completed.ID, progress.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range updated.TagIDs {
+		if id == progress.ID {
+			t.Fatalf("progress tag should be removed when completed tag is added: %v", updated.TagIDs)
+		}
+	}
+	done, err := SetTodoStatus(d, todo.ID, "done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range done.TagIDs {
+		if id == progress.ID {
+			t.Fatalf("progress tag should be removed on completion: %v", done.TagIDs)
+		}
+	}
+	pending, err := SetTodoStatus(d, todo.ID, "pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range pending.TagIDs {
+		if id == completed.ID {
+			t.Fatalf("completed tag should be removed when reopened: %v", pending.TagIDs)
+		}
+	}
+}
+
 func TestTimeEntryStartStop(t *testing.T) {
 	d := newTestDB(t)
 	g, _ := CreateGroup(d, models.Group{Name: "开发", Color: "#6366f1"})

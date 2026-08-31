@@ -221,6 +221,13 @@ func setTodoTags(db *sql.DB, todoID int64, tagIDs []int64) error {
 }
 
 const completedTagName = "已完成"
+const progressTagName = "进行中"
+
+func tagIDByName(db *sql.DB, name string) (int64, error) {
+	var id int64
+	err := db.QueryRow(`SELECT id FROM tags WHERE name = ? ORDER BY id LIMIT 1`, name).Scan(&id)
+	return id, err
+}
 
 // completedTagID returns the shared system tag used to mark completed todos,
 // creating it only when the first todo is completed.
@@ -273,6 +280,66 @@ func syncCompletedTag(db *sql.DB, todoID int64, tagIDs []int64, completed bool) 
 	return setTodoTags(db, todoID, updated)
 }
 
+// normalizeStatusTags enforces that the two system status tags are mutually
+// exclusive. A completed status always wins; otherwise an explicitly selected
+// completed tag wins over an in-progress tag. The completed tag is removed
+// when a task is reopened, matching the status transition semantics.
+func normalizeStatusTags(db *sql.DB, tagIDs []int64, status string, removeCompleted bool) ([]int64, error) {
+	completedID, completedErr := tagIDByName(db, completedTagName)
+	if completedErr != nil && completedErr != sql.ErrNoRows {
+		return nil, completedErr
+	}
+	progressID, progressErr := tagIDByName(db, progressTagName)
+	if progressErr != nil && progressErr != sql.ErrNoRows {
+		return nil, progressErr
+	}
+
+	seen := map[int64]bool{}
+	clean := make([]int64, 0, len(tagIDs)+1)
+	hasCompleted, hasProgress := false, false
+	for _, id := range tagIDs {
+		if id <= 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if completedErr == nil && id == completedID {
+			hasCompleted = true
+		}
+		if progressErr == nil && id == progressID {
+			hasProgress = true
+		}
+		clean = append(clean, id)
+	}
+
+	if (status == "done" && progressErr == nil) || (completedErr == nil && hasCompleted && hasProgress) {
+		filtered := clean[:0]
+		for _, id := range clean {
+			if progressErr == nil && id == progressID {
+				continue
+			}
+			filtered = append(filtered, id)
+		}
+		clean = filtered
+	}
+	if removeCompleted && completedErr == nil {
+		filtered := clean[:0]
+		for _, id := range clean {
+			if id != completedID {
+				filtered = append(filtered, id)
+			}
+		}
+		clean = filtered
+	}
+	if status == "done" {
+		id, err := completedTagID(db)
+		if err != nil {
+			return nil, err
+		}
+		clean = append(clean, id)
+	}
+	return clean, nil
+}
+
 // CollectDescendantIDs returns all descendant todo IDs for the given todo,
 // recursively collecting children, grandchildren, etc.
 func CollectDescendantIDs(db *sql.DB, id int64) ([]int64, error) {
@@ -309,6 +376,11 @@ func CreateTodo(db *sql.DB, t models.Todo) (models.Todo, error) {
 	if err := inheritParentTags(db, &t); err != nil {
 		return models.Todo{}, err
 	}
+	normalizedTags, err := normalizeStatusTags(db, t.TagIDs, t.Status, false)
+	if err != nil {
+		return models.Todo{}, err
+	}
+	t.TagIDs = normalizedTags
 	var completedAt any
 	if t.Status == "done" {
 		c := tutil.Now()
@@ -343,6 +415,11 @@ func UpdateTodo(db *sql.DB, id int64, t models.Todo) (models.Todo, error) {
 	if t.TagIDs == nil {
 		t.TagIDs = existing.TagIDs
 	}
+	normalizedTags, err := normalizeStatusTags(db, t.TagIDs, t.Status, existing.Status == "done" && t.Status != "done")
+	if err != nil {
+		return models.Todo{}, err
+	}
+	t.TagIDs = normalizedTags
 	var completedAt any
 	if t.Status == "done" {
 		if existing.Status == "done" && existing.CompletedAt != nil {
@@ -389,7 +466,11 @@ func SetTodoStatus(db *sql.DB, id int64, status string) (models.Todo, error) {
 		status, completedAt, id); err != nil {
 		return existing, err
 	}
-	if err := syncCompletedTag(db, id, existing.TagIDs, status == "done"); err != nil {
+	tagIDs, err := normalizeStatusTags(db, existing.TagIDs, status, status != "done")
+	if err != nil {
+		return existing, err
+	}
+	if err := setTodoTags(db, id, tagIDs); err != nil {
 		return existing, err
 	}
 	return GetTodo(db, id)

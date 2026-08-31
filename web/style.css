@@ -329,7 +329,6 @@ body {
 .improvement-box .save-row { display: flex; justify-content: flex-end; margin-top: 8px; gap: 8px; }
 
 /* 今日：记录模式切换 + 补录表单 */
-#today-mode-seg { flex-shrink: 0; }
 .backfill-body { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
 .bf-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .bf-row .input, .bf-row .select { flex: 1 1 120px; min-width: 110px; }
