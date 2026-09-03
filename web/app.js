@@ -364,8 +364,7 @@ async function onTimerToggle() {
 async function onBackfillAdd() {
   const sd = $('#bf-date').value || todayStr();
   const startInput = $('#bf-start');
-  const autoFilledStart = !startInput.value;
-  if (autoFilledStart) startInput.value = currentTime();
+  if (!startInput.value) startInput.value = currentTime();
   const st = startInput.value;
   const ed = $('#bf-end-date').value || sd;
   const en = $('#bf-end').value;
@@ -383,8 +382,8 @@ async function onBackfillAdd() {
   try {
     await api('POST', '/api/time-entries', body);
     $('#bf-note').value = '';
+    startInput.value = '';
     $('#bf-end').value = '';
-    if (autoFilledStart) startInput.value = '';
     await refreshActiveEntry();
     renderRecorder();
     await renderTodayTimelineAnalysis();
@@ -1880,7 +1879,6 @@ function todoSelect(selectedId, groupId) {
   const flatList = [];
   function walk(todos, depth, parentGroupId) {
     for (const t of todos) {
-      if (t.status === 'done') continue;
       const effectiveGroupId = t.parent_id ? (parentGroupId ?? (t.tag_ids || [])[0]) : (t.tag_ids || [])[0];
       const tagIDs = t.tag_ids || (effectiveGroupId ? [effectiveGroupId] : []);
       if (groupId != null) {
