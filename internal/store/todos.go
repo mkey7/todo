@@ -11,16 +11,15 @@ import (
 func scanTodo(scanner interface{ Scan(...any) error }) (models.Todo, error) {
 	var t models.Todo
 	var parentID sql.NullInt64
-	var title, description, status sql.NullString
+	var title, description sql.NullString
 	var dueDate, completedAt, createdAt sql.NullString
 	err := scanner.Scan(&t.ID, &parentID, &title, &description,
-		&status, &t.Priority, &dueDate, &createdAt, &completedAt)
+		&t.Priority, &dueDate, &createdAt, &completedAt)
 	if err != nil {
 		return t, err
 	}
 	t.Title = title.String
 	t.Description = description.String
-	t.Status = status.String
 	t.CreatedAt = createdAt.String
 	t.ParentID = models.NullInt(parentID)
 	t.DueDate = models.NullStr(dueDate)
@@ -28,21 +27,21 @@ func scanTodo(scanner interface{ Scan(...any) error }) (models.Todo, error) {
 	return t, nil
 }
 
-const todoColumns = `id, parent_id, title, description, status, priority, due_date, created_at, completed_at`
+const todoColumns = `id, parent_id, title, description, priority, due_date, created_at, completed_at`
 
-// ListTodos returns todos optionally filtered by group_id and/or status.
+// ListTodos returns top-level todos optionally filtered by tag name.
 // Only top-level todos (parent_id IS NULL) are returned by default; children
 // are fetched and assembled via WithChildren.
-func ListTodos(db *sql.DB, groupID *int64, status string) ([]models.Todo, error) {
+func ListTodos(db *sql.DB, tagID *int64, statusTag string) ([]models.Todo, error) {
 	q := `SELECT ` + todoColumns + ` FROM todos WHERE parent_id IS NULL`
 	args := []any{}
-	if groupID != nil {
+	if tagID != nil {
 		q += ` AND EXISTS (SELECT 1 FROM todo_tags tt WHERE tt.todo_id = todos.id AND tt.tag_id = ?)`
-		args = append(args, *groupID)
+		args = append(args, *tagID)
 	}
-	if status != "" {
-		q += ` AND status = ?`
-		args = append(args, status)
+	if statusTag != "" {
+		q += ` AND EXISTS (SELECT 1 FROM todo_tags tt JOIN tags tg ON tg.id = tt.tag_id WHERE tt.todo_id = todos.id AND tg.name = ?)`
+		args = append(args, statusTag)
 	}
 	q += ` ORDER BY priority DESC, created_at ASC`
 
@@ -118,10 +117,10 @@ func WithChildren(db *sql.DB, ts []models.Todo) ([]models.Todo, error) {
 // applyInheritedTags exposes the parent's tags on every child, including
 // subtasks created before tag inheritance was introduced. Child-specific tags
 // remain intact and are appended after inherited tags.
-func applyInheritedTags(todos []models.Todo, inherited []models.Group) {
+func applyInheritedTags(todos []models.Todo, inherited []models.Tag) {
 	for i := range todos {
 		seen := map[int64]bool{}
-		tags := make([]models.Group, 0, len(inherited)+len(todos[i].Tags))
+		tags := make([]models.Tag, 0, len(inherited)+len(todos[i].Tags))
 		for _, tag := range inherited {
 			if !seen[tag.ID] {
 				seen[tag.ID] = true
@@ -164,10 +163,10 @@ func loadTodoTags(db *sql.DB, t *models.Todo) error {
 		return err
 	}
 	defer rows.Close()
-	t.Tags = []models.Group{}
+	t.Tags = []models.Tag{}
 	t.TagIDs = []int64{}
 	for rows.Next() {
-		var g models.Group
+		var g models.Tag
 		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.Color, &g.CreatedAt); err != nil {
 			return err
 		}
@@ -229,6 +228,19 @@ func tagIDByName(db *sql.DB, name string) (int64, error) {
 	return id, err
 }
 
+func hasTag(db *sql.DB, tagIDs []int64, name string) bool {
+	id, err := tagIDByName(db, name)
+	if err != nil {
+		return false
+	}
+	for _, tagID := range tagIDs {
+		if tagID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // completedTagID returns the shared system tag used to mark completed todos,
 // creating it only when the first todo is completed.
 func completedTagID(db *sql.DB) (int64, error) {
@@ -240,7 +252,7 @@ func completedTagID(db *sql.DB) (int64, error) {
 	if err != sql.ErrNoRows {
 		return 0, err
 	}
-	created, err := CreateGroup(db, models.Group{
+	created, err := CreateTag(db, models.Tag{
 		Name:           completedTagName,
 		Description:    "系统自动添加：任务完成时标记",
 		Color:          "#22c55e",
@@ -252,39 +264,10 @@ func completedTagID(db *sql.DB) (int64, error) {
 	return created.ID, nil
 }
 
-// syncCompletedTag keeps the automatic completed tag at the end of a task's
-// tag order, so it never replaces the task's primary timeline color.
-func syncCompletedTag(db *sql.DB, todoID int64, tagIDs []int64, completed bool) error {
-	var completedID int64
-	if completed {
-		var err error
-		completedID, err = completedTagID(db)
-		if err != nil {
-			return err
-		}
-	} else if err := db.QueryRow(`SELECT id FROM tags WHERE name = ? ORDER BY id LIMIT 1`, completedTagName).Scan(&completedID); err != nil {
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		return err
-	}
-	updated := make([]int64, 0, len(tagIDs)+1)
-	for _, tagID := range tagIDs {
-		if tagID != completedID {
-			updated = append(updated, tagID)
-		}
-	}
-	if completed {
-		updated = append(updated, completedID)
-	}
-	return setTodoTags(db, todoID, updated)
-}
-
-// normalizeStatusTags enforces that the two system status tags are mutually
-// exclusive. A completed status always wins; otherwise an explicitly selected
-// completed tag wins over an in-progress tag. The completed tag is removed
-// when a task is reopened, matching the status transition semantics.
-func normalizeStatusTags(db *sql.DB, tagIDs []int64, status string, removeCompleted bool) ([]int64, error) {
+// normalizeStatusTags enforces mutual exclusion for the two system tags.
+// state is empty for ordinary tag edits, or one of "pending", "in_progress",
+// and "done" when called by the compatibility status endpoint.
+func normalizeStatusTags(db *sql.DB, tagIDs []int64, state string) ([]int64, error) {
 	completedID, completedErr := tagIDByName(db, completedTagName)
 	if completedErr != nil && completedErr != sql.ErrNoRows {
 		return nil, completedErr
@@ -311,7 +294,7 @@ func normalizeStatusTags(db *sql.DB, tagIDs []int64, status string, removeComple
 		clean = append(clean, id)
 	}
 
-	if (status == "done" && progressErr == nil) || (completedErr == nil && hasCompleted && hasProgress) {
+	if (state == "done" && progressErr == nil) || (completedErr == nil && hasCompleted && hasProgress) {
 		filtered := clean[:0]
 		for _, id := range clean {
 			if progressErr == nil && id == progressID {
@@ -321,7 +304,7 @@ func normalizeStatusTags(db *sql.DB, tagIDs []int64, status string, removeComple
 		}
 		clean = filtered
 	}
-	if removeCompleted && completedErr == nil {
+	if (state == "pending" || state == "in_progress") && completedErr == nil {
 		filtered := clean[:0]
 		for _, id := range clean {
 			if id != completedID {
@@ -330,7 +313,19 @@ func normalizeStatusTags(db *sql.DB, tagIDs []int64, status string, removeComple
 		}
 		clean = filtered
 	}
-	if status == "done" {
+	if state == "pending" && progressErr == nil {
+		filtered := clean[:0]
+		for _, id := range clean {
+			if id != progressID {
+				filtered = append(filtered, id)
+			}
+		}
+		clean = filtered
+	}
+	if state == "in_progress" && progressErr == nil {
+		clean = append(clean, progressID)
+	}
+	if state == "done" {
 		id, err := completedTagID(db)
 		if err != nil {
 			return nil, err
@@ -340,29 +335,63 @@ func normalizeStatusTags(db *sql.DB, tagIDs []int64, status string, removeComple
 	return clean, nil
 }
 
+// clearDescendantProgressTags removes the "进行中" tag from every descendant of
+// todoID. Completing a task also takes its subtasks off the today board, so a
+// finished parent never leaves stale in-progress children behind.
+func clearDescendantProgressTags(db *sql.DB, todoID int64) error {
+	progressID, err := tagIDByName(db, progressTagName)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	ids, err := CollectDescendantIDs(db, todoID)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := db.Exec(`DELETE FROM todo_tags WHERE todo_id = ? AND tag_id = ?`, id, progressID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // CollectDescendantIDs returns all descendant todo IDs for the given todo,
-// recursively collecting children, grandchildren, etc.
+// recursively collecting children, grandchildren, etc. The child rows are read
+// to completion before recursing: the pool holds a single connection, so a
+// nested query while the cursor is open would block forever.
 func CollectDescendantIDs(db *sql.DB, id int64) ([]int64, error) {
 	rows, err := db.Query(`SELECT id FROM todos WHERE parent_id = ?`, id)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var ids []int64
+	var children []int64
 	for rows.Next() {
 		var childID int64
 		if err := rows.Scan(&childID); err != nil {
+			rows.Close()
 			return nil, err
 		}
+		children = append(children, childID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	ids := make([]int64, 0, len(children))
+	for _, childID := range children {
 		ids = append(ids, childID)
-		// Recurse
 		grandIDs, err := CollectDescendantIDs(db, childID)
 		if err != nil {
 			return nil, err
 		}
 		ids = append(ids, grandIDs...)
 	}
-	return ids, rows.Err()
+	return ids, nil
 }
 
 // CreateTodo inserts a todo. If ParentID is set, it becomes a subtask.
@@ -370,26 +399,23 @@ func CreateTodo(db *sql.DB, t models.Todo) (models.Todo, error) {
 	if t.Title == "" {
 		return models.Todo{}, fmt.Errorf("title is required")
 	}
-	if t.Status == "" {
-		t.Status = "pending"
-	}
 	if err := inheritParentTags(db, &t); err != nil {
 		return models.Todo{}, err
 	}
-	normalizedTags, err := normalizeStatusTags(db, t.TagIDs, t.Status, false)
+	normalizedTags, err := normalizeStatusTags(db, t.TagIDs, "")
 	if err != nil {
 		return models.Todo{}, err
 	}
 	t.TagIDs = normalizedTags
 	var completedAt any
-	if t.Status == "done" {
+	if hasTag(db, t.TagIDs, completedTagName) {
 		c := tutil.Now()
 		completedAt = c
 		t.CompletedAt = &c
 	}
-	res, err := db.Exec(`INSERT INTO todos (parent_id, title, description, status, priority, due_date, completed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		t.ParentID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, completedAt)
+	res, err := db.Exec(`INSERT INTO todos (parent_id, title, description, priority, due_date, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		t.ParentID, t.Title, t.Description, t.Priority, t.DueDate, completedAt)
 	if err != nil {
 		return models.Todo{}, err
 	}
@@ -403,7 +429,7 @@ func CreateTodo(db *sql.DB, t models.Todo) (models.Todo, error) {
 	return GetTodo(db, id)
 }
 
-// UpdateTodo replaces editable fields and recomputes completed_at from status.
+// UpdateTodo replaces editable fields and derives completion from the tags.
 func UpdateTodo(db *sql.DB, id int64, t models.Todo) (models.Todo, error) {
 	existing, err := GetTodo(db, id)
 	if err != nil {
@@ -415,14 +441,14 @@ func UpdateTodo(db *sql.DB, id int64, t models.Todo) (models.Todo, error) {
 	if t.TagIDs == nil {
 		t.TagIDs = existing.TagIDs
 	}
-	normalizedTags, err := normalizeStatusTags(db, t.TagIDs, t.Status, existing.Status == "done" && t.Status != "done")
+	normalizedTags, err := normalizeStatusTags(db, t.TagIDs, "")
 	if err != nil {
 		return models.Todo{}, err
 	}
 	t.TagIDs = normalizedTags
 	var completedAt any
-	if t.Status == "done" {
-		if existing.Status == "done" && existing.CompletedAt != nil {
+	if hasTag(db, t.TagIDs, completedTagName) {
+		if existing.CompletedAt != nil {
 			completedAt = *existing.CompletedAt
 		} else {
 			c := tutil.Now()
@@ -430,8 +456,8 @@ func UpdateTodo(db *sql.DB, id int64, t models.Todo) (models.Todo, error) {
 		}
 	}
 	if _, err := db.Exec(`UPDATE todos SET parent_id = ?, title = ?, description = ?,
-		status = ?, priority = ?, due_date = ?, completed_at = ? WHERE id = ?`,
-		t.ParentID, t.Title, t.Description, t.Status, t.Priority, t.DueDate, completedAt, id); err != nil {
+		priority = ?, due_date = ?, completed_at = ? WHERE id = ?`,
+		t.ParentID, t.Title, t.Description, t.Priority, t.DueDate, completedAt, id); err != nil {
 		return models.Todo{}, err
 	}
 	if t.TagIDs != nil {
@@ -439,10 +465,16 @@ func UpdateTodo(db *sql.DB, id int64, t models.Todo) (models.Todo, error) {
 			return models.Todo{}, err
 		}
 	}
+	if hasTag(db, t.TagIDs, completedTagName) && !hasTag(db, existing.TagIDs, completedTagName) {
+		if err := clearDescendantProgressTags(db, id); err != nil {
+			return models.Todo{}, err
+		}
+	}
 	return GetTodo(db, id)
 }
 
-// SetTodoStatus updates only the status and manages completed_at accordingly.
+// SetTodoStatus is retained as an API compatibility operation; it changes the
+// corresponding status tag instead of writing a status column.
 func SetTodoStatus(db *sql.DB, id int64, status string) (models.Todo, error) {
 	existing, err := GetTodo(db, id)
 	if err != nil {
@@ -462,16 +494,20 @@ func SetTodoStatus(db *sql.DB, id int64, status string) (models.Todo, error) {
 	default:
 		return existing, fmt.Errorf("invalid status: %s", status)
 	}
-	if _, err := db.Exec(`UPDATE todos SET status = ?, completed_at = ? WHERE id = ?`,
-		status, completedAt, id); err != nil {
-		return existing, err
-	}
-	tagIDs, err := normalizeStatusTags(db, existing.TagIDs, status, status != "done")
+	tagIDs, err := normalizeStatusTags(db, existing.TagIDs, status)
 	if err != nil {
 		return existing, err
 	}
 	if err := setTodoTags(db, id, tagIDs); err != nil {
 		return existing, err
+	}
+	if _, err := db.Exec(`UPDATE todos SET completed_at = ? WHERE id = ?`, completedAt, id); err != nil {
+		return existing, err
+	}
+	if status == "done" {
+		if err := clearDescendantProgressTags(db, id); err != nil {
+			return existing, err
+		}
 	}
 	return GetTodo(db, id)
 }
@@ -486,15 +522,15 @@ func DeleteTodo(db *sql.DB, id int64) error {
 func CountCompletedOnDate(db *sql.DB, date string) (int, error) {
 	start, end := tutil.DayRange(date)
 	var n int
-	err := db.QueryRow(`SELECT COUNT(*) FROM todos WHERE status = 'done' AND completed_at >= ? AND completed_at < ?`,
-		start, end).Scan(&n)
+	err := db.QueryRow(`SELECT COUNT(*) FROM todos t JOIN todo_tags tt ON tt.todo_id = t.id JOIN tags g ON g.id = tt.tag_id
+		WHERE g.name = ? AND t.completed_at >= ? AND t.completed_at < ?`, completedTagName, start, end).Scan(&n)
 	return n, err
 }
 
 // CountCompletedInRange returns how many todos were completed within [start, end).
 func CountCompletedInRange(db *sql.DB, start, end string) (int, error) {
 	var n int
-	err := db.QueryRow(`SELECT COUNT(*) FROM todos WHERE status = 'done' AND completed_at >= ? AND completed_at < ?`,
-		start, end).Scan(&n)
+	err := db.QueryRow(`SELECT COUNT(*) FROM todos t JOIN todo_tags tt ON tt.todo_id = t.id JOIN tags g ON g.id = tt.tag_id
+		WHERE g.name = ? AND t.completed_at >= ? AND t.completed_at < ?`, completedTagName, start, end).Scan(&n)
 	return n, err
 }

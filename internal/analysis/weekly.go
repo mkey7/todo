@@ -62,7 +62,7 @@ func AnalyzeWeekly(db *sql.DB, week string) (WeeklyResult, error) {
 		}
 	}
 
-	res.GroupBreakdown, err = buildGroupBreakdown(db, entries, res.TotalSeconds)
+	res.TagBreakdown, err = buildTagBreakdown(db, entries, res.TotalSeconds)
 	if err != nil {
 		return WeeklyResult{}, err
 	}
@@ -127,9 +127,9 @@ func weeklySummaryText(r WeeklyResult) string {
 	if r.BestDay != nil {
 		parts = append(parts, fmt.Sprintf("投入最多的一天是 %s（%s）。", r.BestDay.Weekday, r.BestDay.Duration))
 	}
-	if len(r.GroupBreakdown) > 0 {
-		g := r.GroupBreakdown[0]
-		parts = append(parts, fmt.Sprintf("主要投入在标签「%s」(%.0f%%)。", g.GroupName, g.Percent))
+	if len(r.TagBreakdown) > 0 {
+		g := r.TagBreakdown[0]
+		parts = append(parts, fmt.Sprintf("主要投入在标签「%s」(%.0f%%)。", g.TagName, g.Percent))
 	}
 	if r.VsLastWeek != nil && r.VsLastWeek.LastWeekSeconds > 0 {
 		d := r.VsLastWeek

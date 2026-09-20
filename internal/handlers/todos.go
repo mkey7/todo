@@ -10,10 +10,10 @@ import (
 )
 
 func (h *Handler) ListTodos(w http.ResponseWriter, r *http.Request) {
-	groupID := ptrInt64Param(r, "group_id")
-	status := strParam(r, "status")
+	tagID := ptrInt64Param(r, "tag_id")
+	statusTag := strParam(r, "status_tag")
 
-	ts, err := store.ListTodos(h.DB, groupID, status)
+	ts, err := store.ListTodos(h.DB, tagID, statusTag)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

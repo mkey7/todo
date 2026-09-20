@@ -8,25 +8,25 @@ import (
 	"todo/internal/store"
 )
 
-func (h *Handler) ListGroups(w http.ResponseWriter, r *http.Request) {
-	gs, err := store.ListGroups(h.DB)
+func (h *Handler) ListTags(w http.ResponseWriter, r *http.Request) {
+	tags, err := store.ListTags(h.DB)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if gs == nil {
-		gs = []models.Group{}
+	if tags == nil {
+		tags = []models.Tag{}
 	}
-	writeJSON(w, http.StatusOK, gs)
+	writeJSON(w, http.StatusOK, tags)
 }
 
-func (h *Handler) CreateGroup(w http.ResponseWriter, r *http.Request) {
-	var g models.Group
-	if err := decodeJSON(r, &g); err != nil {
+func (h *Handler) CreateTag(w http.ResponseWriter, r *http.Request) {
+	var tag models.Tag
+	if err := decodeJSON(r, &tag); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	created, err := store.CreateGroup(h.DB, g)
+	created, err := store.CreateTag(h.DB, tag)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -34,18 +34,18 @@ func (h *Handler) CreateGroup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
-func (h *Handler) UpdateGroup(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) UpdateTag(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	var g models.Group
-	if err := decodeJSON(r, &g); err != nil {
+	var tag models.Tag
+	if err := decodeJSON(r, &tag); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	updated, err := store.UpdateGroup(h.DB, id, g)
+	updated, err := store.UpdateTag(h.DB, id, tag)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -53,13 +53,13 @@ func (h *Handler) UpdateGroup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, updated)
 }
 
-func (h *Handler) DeleteGroup(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) DeleteTag(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	if err := store.DeleteGroup(h.DB, id); err != nil {
+	if err := store.DeleteTag(h.DB, id); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}

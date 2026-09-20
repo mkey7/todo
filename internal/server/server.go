@@ -30,16 +30,10 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
 	// --- API ---
-	mux.HandleFunc("GET /api/groups", h.ListGroups)
-	mux.HandleFunc("POST /api/groups", h.CreateGroup)
-	mux.HandleFunc("PUT /api/groups/{id}", h.UpdateGroup)
-	mux.HandleFunc("DELETE /api/groups/{id}", h.DeleteGroup)
-	// Tags are the current public vocabulary. Keep /groups routes for clients
-	// created before the grouping-to-tag migration.
-	mux.HandleFunc("GET /api/tags", h.ListGroups)
-	mux.HandleFunc("POST /api/tags", h.CreateGroup)
-	mux.HandleFunc("PUT /api/tags/{id}", h.UpdateGroup)
-	mux.HandleFunc("DELETE /api/tags/{id}", h.DeleteGroup)
+	mux.HandleFunc("GET /api/tags", h.ListTags)
+	mux.HandleFunc("POST /api/tags", h.CreateTag)
+	mux.HandleFunc("PUT /api/tags/{id}", h.UpdateTag)
+	mux.HandleFunc("DELETE /api/tags/{id}", h.DeleteTag)
 
 	mux.HandleFunc("GET /api/todos", h.ListTodos)
 	mux.HandleFunc("POST /api/todos", h.CreateTodo)
@@ -69,7 +63,7 @@ func (s *Server) routes() http.Handler {
 	fileServer := http.FileServer(http.FS(s.webFS))
 	mux.Handle("/", fileHandler{fs: s.webFS, h: fileServer})
 
-	return loggingMiddleware(corsMiddleware(mux))
+	return corsMiddleware(mux)
 }
 
 // fileHandler serves embedded files and falls back to index.html for
@@ -104,12 +98,6 @@ func corsMiddleware(next http.Handler) http.Handler {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func loggingMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		next.ServeHTTP(w, r)
 	})
 }

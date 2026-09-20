@@ -27,11 +27,12 @@
 
 任务以标签而不是传统分组进行管理，适合一个任务同时属于多个工作维度的场景，例如“项目 A + 紧急 + 开发”。
 
-- 支持任务、子任务、优先级、截止日期和完成状态。
+- 支持任务、子任务、优先级和截止日期；任务状态完全由标签表示。
 - 一个任务可拥有多个标签，并可在编辑任务时调整标签顺序。
 - 第一个标签为主标签，用于时间轴颜色。
 - 勾选完成会自动添加“已完成”标签；重新打开任务会自动移除该标签。
-- “今日任务”是“进行中”标签的任务看板：加入进行中即添加该标签，移出则删除。
+- “今日任务”是“进行中”标签的任务看板：加入进行中即添加该标签，移出则删除。看板只显示未完成任务，勾选完成的父任务会同时把其子任务移出进行中，已完成任务不再显示在看板中。
+- 子任务指任何有父节点的任务；今日看板会保留未完成的子任务以显示层级。
 - 标签筛选支持 AND、OR、NOT 组合，应对复杂任务关系。
 - 标签可设置是否参与时间分析中的标签分布统计；“进行中”“已完成”等状态标签默认不参与统计。
 
@@ -57,7 +58,7 @@
 | 数据 | 主要字段 | 说明 |
 |---|---|---|
 | 标签 `tags` | 名称、颜色、是否计入统计 | 分类与筛选基础 |
-| 任务 `todos` | 标题、状态、优先级、截止日期、父任务 | 支持子任务层级 |
+| 任务 `todos` | 标题、优先级、截止日期、父任务、完成时间 | 支持子任务层级，状态不再单独存储 |
 | 任务标签 `todo_tags` | 任务 ID、标签 ID、`tag_order` | 多标签与主标签顺序 |
 | 时间记录 `time_entries` | 任务 ID、标签 ID、开始/结束时间、备注 | 工作时间明细 |
 | 每日总结 `daily_summaries` | 日期、`content` | 当日总结 |
@@ -98,7 +99,7 @@ go test ./...
 ## API
 
 - `GET/POST/PUT/DELETE /api/tags`
-- `GET/POST /api/todos`、`PUT/DELETE /api/todos/{id}`、`PATCH /api/todos/{id}/status`
+- `GET/POST /api/todos`、`PUT/DELETE /api/todos/{id}`、`PATCH /api/todos/{id}/status`（兼容接口，实际更新状态标签）
 - `GET/POST/PUT/DELETE /api/time-entries`
 - `POST /api/time-entries/start`、`POST /api/time-entries/stop`、`GET /api/time-entries/active`
 - `GET/PUT /api/summaries/daily?date=YYYY-MM-DD`

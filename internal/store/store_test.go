@@ -19,27 +19,36 @@ func newTestDB(t *testing.T) *sql.DB {
 	return d
 }
 
-func TestGroupCRUD(t *testing.T) {
+func hasTagName(t models.Todo, name string) bool {
+	for _, tag := range t.Tags {
+		if tag.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestTagCRUD(t *testing.T) {
 	d := newTestDB(t)
-	g, err := CreateGroup(d, models.Group{Name: "开发", Color: "#6366f1"})
+	g, err := CreateTag(d, models.Tag{Name: "开发", Color: "#6366f1"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if g.ID == 0 || g.Name != "开发" {
-		t.Errorf("unexpected group: %+v", g)
+		t.Errorf("unexpected tag: %+v", g)
 	}
-	gs, _ := ListGroups(d)
+	gs, _ := ListTags(d)
 	if len(gs) != 1 {
 		t.Errorf("list len = %d, want 1", len(gs))
 	}
-	g, _ = UpdateGroup(d, g.ID, models.Group{Name: "开发组", Color: "#22c55e"})
+	g, _ = UpdateTag(d, g.ID, models.Tag{Name: "开发组", Color: "#22c55e"})
 	if g.Name != "开发组" {
 		t.Errorf("update name = %s", g.Name)
 	}
-	if err := DeleteGroup(d, g.ID); err != nil {
+	if err := DeleteTag(d, g.ID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	gs, _ = ListGroups(d)
+	gs, _ = ListTags(d)
 	if len(gs) != 0 {
 		t.Errorf("after delete len = %d", len(gs))
 	}
@@ -58,7 +67,7 @@ func TestTodoSubtasksAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("set status: %v", err)
 	}
-	if updated.Status != "done" || updated.CompletedAt == nil {
+	if updated.CompletedAt == nil || !hasTagName(updated, completedTagName) {
 		t.Errorf("done state wrong: %+v", updated)
 	}
 
@@ -79,8 +88,8 @@ func TestTodoSubtasksAndStatus(t *testing.T) {
 
 func TestSubtaskInheritsAndExtendsParentTags(t *testing.T) {
 	d := newTestDB(t)
-	work, _ := CreateGroup(d, models.Group{Name: "工作", Color: "#6366f1"})
-	urgent, _ := CreateGroup(d, models.Group{Name: "紧急", Color: "#ef4444"})
+	work, _ := CreateTag(d, models.Tag{Name: "工作", Color: "#6366f1"})
+	urgent, _ := CreateTag(d, models.Tag{Name: "紧急", Color: "#ef4444"})
 	parent, err := CreateTodo(d, models.Todo{Title: "父任务", TagIDs: []int64{work.ID}})
 	if err != nil {
 		t.Fatalf("create parent: %v", err)
@@ -96,24 +105,24 @@ func TestSubtaskInheritsAndExtendsParentTags(t *testing.T) {
 
 func TestTodoTagOrderSetsPrimaryTag(t *testing.T) {
 	d := newTestDB(t)
-	first, _ := CreateGroup(d, models.Group{Name: "第一", Color: "#6366f1"})
-	second, _ := CreateGroup(d, models.Group{Name: "第二", Color: "#ef4444"})
+	first, _ := CreateTag(d, models.Tag{Name: "第一", Color: "#6366f1"})
+	second, _ := CreateTag(d, models.Tag{Name: "第二", Color: "#ef4444"})
 	todo, err := CreateTodo(d, models.Todo{Title: "排序", TagIDs: []int64{first.ID, second.ID}})
 	if err != nil {
 		t.Fatalf("create todo: %v", err)
 	}
-	updated, err := UpdateTodo(d, todo.ID, models.Todo{Title: todo.Title, Status: todo.Status, TagIDs: []int64{second.ID, first.ID}})
+	updated, err := UpdateTodo(d, todo.ID, models.Todo{Title: todo.Title, TagIDs: []int64{second.ID, first.ID}})
 	if err != nil {
 		t.Fatalf("update todo: %v", err)
 	}
 	if len(updated.TagIDs) != 2 || updated.TagIDs[0] != second.ID {
-		t.Errorf("tag order / primary group = %+v", updated)
+		t.Errorf("tag order / primary tag = %+v", updated)
 	}
 }
 
 func TestCompletedTodoGetsAutomaticCompletedTag(t *testing.T) {
 	d := newTestDB(t)
-	work, _ := CreateGroup(d, models.Group{Name: "工作", Color: "#6366f1"})
+	work, _ := CreateTag(d, models.Tag{Name: "工作", Color: "#6366f1"})
 	todo, err := CreateTodo(d, models.Todo{Title: "完成标签", TagIDs: []int64{work.ID}})
 	if err != nil {
 		t.Fatalf("create todo: %v", err)
@@ -136,14 +145,14 @@ func TestCompletedTodoGetsAutomaticCompletedTag(t *testing.T) {
 
 func TestStatusTagsAreMutuallyExclusive(t *testing.T) {
 	d := newTestDB(t)
-	work, _ := CreateGroup(d, models.Group{Name: "工作", Color: "#6366f1"})
-	progress, _ := CreateGroup(d, models.Group{Name: progressTagName, Color: "#3b82f6"})
-	completed, _ := CreateGroup(d, models.Group{Name: completedTagName, Color: "#22c55e"})
+	work, _ := CreateTag(d, models.Tag{Name: "工作", Color: "#6366f1"})
+	progress, _ := CreateTag(d, models.Tag{Name: progressTagName, Color: "#3b82f6"})
+	completed, _ := CreateTag(d, models.Tag{Name: completedTagName, Color: "#22c55e"})
 	todo, err := CreateTodo(d, models.Todo{Title: "互斥", TagIDs: []int64{work.ID, progress.ID}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, err := UpdateTodo(d, todo.ID, models.Todo{Title: todo.Title, Status: todo.Status, TagIDs: []int64{work.ID, completed.ID, progress.ID}})
+	updated, err := UpdateTodo(d, todo.ID, models.Todo{Title: todo.Title, TagIDs: []int64{work.ID, completed.ID, progress.ID}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,12 +181,55 @@ func TestStatusTagsAreMutuallyExclusive(t *testing.T) {
 	}
 }
 
+func TestCompletingParentClearsDescendantProgressTags(t *testing.T) {
+	d := newTestDB(t)
+	progress, _ := CreateTag(d, models.Tag{Name: progressTagName, Color: "#3b82f6"})
+	parent, err := CreateTodo(d, models.Todo{Title: "父任务", TagIDs: []int64{progress.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := CreateTodo(d, models.Todo{Title: "子任务", ParentID: &parent.ID, TagIDs: []int64{progress.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grandchild, err := CreateTodo(d, models.Todo{Title: "孙任务", ParentID: &child.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SetTodoStatus(d, parent.ID, "done"); err != nil {
+		t.Fatalf("complete parent: %v", err)
+	}
+	for _, id := range []int64{child.ID, grandchild.ID} {
+		todo, err := GetTodo(d, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tagID := range todo.TagIDs {
+			if tagID == progress.ID {
+				t.Fatalf("descendant %d kept progress tag on completion: %v", id, todo.TagIDs)
+			}
+		}
+	}
+
+	// Reopening the parent must not resurrect the descendants' progress tag.
+	if _, err := SetTodoStatus(d, parent.ID, "pending"); err != nil {
+		t.Fatalf("reopen parent: %v", err)
+	}
+	child, _ = GetTodo(d, child.ID)
+	for _, tagID := range child.TagIDs {
+		if tagID == progress.ID {
+			t.Fatalf("progress tag should stay cleared after reopening parent: %v", child.TagIDs)
+		}
+	}
+}
+
 func TestTimeEntryStartStop(t *testing.T) {
 	d := newTestDB(t)
-	g, _ := CreateGroup(d, models.Group{Name: "开发", Color: "#6366f1"})
+	g, _ := CreateTag(d, models.Tag{Name: "开发", Color: "#6366f1"})
 	todo, _ := CreateTodo(d, models.Todo{Title: "任务", TagIDs: []int64{g.ID}})
 
-	// start with a todo -> group inherited
+	// start with a todo -> tag inherited
 	e, err := StartEntry(d, &todo.ID, nil, "")
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -224,7 +276,7 @@ func TestTimeEntryStartStop(t *testing.T) {
 
 func TestListEntriesForDayOverlap(t *testing.T) {
 	d := newTestDB(t)
-	g, _ := CreateGroup(d, models.Group{Name: "开发", Color: "#6366f1"})
+	g, _ := CreateTag(d, models.Tag{Name: "开发", Color: "#6366f1"})
 	// entry fully within the day
 	CreateEntry(d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 09:00:00", EndTime: strPtr("2026-07-14 10:00:00")})
 	// entry that ends exactly at day start should NOT appear (end > dayStart is required, 00:00:00 is not > 00:00:00)

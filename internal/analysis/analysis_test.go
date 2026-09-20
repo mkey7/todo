@@ -20,8 +20,8 @@ func setupDB(t *testing.T) *sql.DB {
 	schema := `
 	CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT, color TEXT, include_in_stats INTEGER NOT NULL DEFAULT 1, created_at TEXT);
 	CREATE TABLE todo_tags (todo_id INTEGER, tag_id INTEGER, tag_order INTEGER);
-	CREATE TABLE todos (id INTEGER PRIMARY KEY, group_id INTEGER, parent_id INTEGER, title TEXT, description TEXT,
-		status TEXT, priority INTEGER, due_date TEXT, created_at TEXT, completed_at TEXT);
+	CREATE TABLE todos (id INTEGER PRIMARY KEY, parent_id INTEGER, title TEXT, description TEXT,
+		priority INTEGER, due_date TEXT, created_at TEXT, completed_at TEXT);
 	CREATE TABLE time_entries (id INTEGER PRIMARY KEY, todo_id INTEGER, tag_id INTEGER,
 		start_time TEXT, end_time TEXT, note TEXT, created_at TEXT);
 	CREATE TABLE daily_summaries (id INTEGER PRIMARY KEY, date TEXT UNIQUE, content TEXT, updated_at TEXT);
@@ -56,9 +56,9 @@ func insertEntry(t *testing.T, db *sql.DB, groupID int, start, end string) {
 	}
 }
 
-func TestDailyAnalysisTotalsAndGroups(t *testing.T) {
+func TestDailyAnalysisTotalsAndTags(t *testing.T) {
 	db := setupDB(t)
-	// two groups
+	// two tags
 	db.Exec(`INSERT INTO tags (id, name, color) VALUES (1, '开发', '#6366f1'), (2, '学习', '#22c55e')`)
 
 	today := time.Now().Format("2006-01-02")
@@ -74,15 +74,15 @@ func TestDailyAnalysisTotalsAndGroups(t *testing.T) {
 	if abs(res.TotalSeconds-wantTotal) > 1 {
 		t.Errorf("total seconds = %v, want %v", res.TotalSeconds, wantTotal)
 	}
-	if len(res.GroupBreakdown) != 2 {
-		t.Fatalf("expected 2 groups, got %d", len(res.GroupBreakdown))
+	if len(res.TagBreakdown) != 2 {
+		t.Fatalf("expected 2 tags, got %d", len(res.TagBreakdown))
 	}
-	// study (5400) should be the largest group
-	if res.GroupBreakdown[0].GroupName != "学习" {
-		t.Errorf("expected top group 学习, got %s", res.GroupBreakdown[0].GroupName)
+	// study (5400) should be the largest tag
+	if res.TagBreakdown[0].TagName != "学习" {
+		t.Errorf("expected top tag 学习, got %s", res.TagBreakdown[0].TagName)
 	}
-	if abs(res.GroupBreakdown[0].Seconds-5400) > 1 {
-		t.Errorf("study seconds = %v, want 5400", res.GroupBreakdown[0].Seconds)
+	if abs(res.TagBreakdown[0].Seconds-5400) > 1 {
+		t.Errorf("study seconds = %v, want 5400", res.TagBreakdown[0].Seconds)
 	}
 	if res.EntryCount != 2 {
 		t.Errorf("entry count = %v, want 2", res.EntryCount)

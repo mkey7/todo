@@ -37,7 +37,7 @@ func Open(path string) (*sql.DB, error) {
 	}
 	// Relations are maintained by application logic. Disabling SQLite foreign
 	// keys also keeps databases created by earlier schemas usable after the
-	// groups-to-tags migration.
+	// legacy schema migration.
 	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
 		return nil, fmt.Errorf("disable foreign keys: %w", err)
 	}
@@ -56,7 +56,7 @@ func Open(path string) (*sql.DB, error) {
 	}
 	// schema.sql is also applied to databases created by earlier app versions.
 	// SQLite's CREATE TABLE IF NOT EXISTS does not add new columns, so migrate
-	// the tag description explicitly and preserve every legacy group binding.
+	// the tag description explicitly and preserve legacy tag bindings.
 	// Copy legacy groups into the canonical tags table without changing IDs.
 	if _, err := db.Exec(`INSERT OR IGNORE INTO tags (id, name, description, color, created_at)
 		SELECT id, name, COALESCE(description, ''), color, created_at FROM groups`); err != nil && !strings.Contains(err.Error(), "no such table") {
@@ -77,6 +77,9 @@ func Open(path string) (*sql.DB, error) {
 	} else if !strings.Contains(err.Error(), "duplicate column name") {
 		return nil, fmt.Errorf("migrate todo tag order: %w", err)
 	}
+	if err := migrateTodoStatusColumn(db); err != nil {
+		return nil, err
+	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_todo_tags_order ON todo_tags(todo_id, tag_order)`); err != nil {
 		return nil, fmt.Errorf("index todo tag order: %w", err)
 	}
@@ -92,6 +95,62 @@ func Open(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("migrate todo tags: %w", err)
 	}
 	return db, nil
+}
+
+// migrateTodoStatusColumn moves legacy todo status values into the canonical
+// status tags, then rebuilds todos without the obsolete status column.
+func migrateTodoStatusColumn(db *sql.DB) error {
+	hasStatus, err := hasColumn(db, "todos", "status")
+	if err != nil {
+		return fmt.Errorf("inspect legacy todo status: %w", err)
+	}
+	if !hasStatus {
+		return nil
+	}
+	for _, tag := range []struct {
+		name, color string
+	}{
+		{"进行中", "#3b82f6"},
+		{"已完成", "#22c55e"},
+	} {
+		if _, err := db.Exec(`INSERT INTO tags (name, description, color, include_in_stats)
+			SELECT ?, '系统状态标签', ?, 0
+			WHERE NOT EXISTS (SELECT 1 FROM tags WHERE name = ?)`, tag.name, tag.color, tag.name); err != nil {
+			return fmt.Errorf("create status tag %s: %w", tag.name, err)
+		}
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO todo_tags (todo_id, tag_id, tag_order)
+		SELECT id, (SELECT id FROM tags WHERE name = '进行中' ORDER BY id LIMIT 1), 0
+		FROM todos WHERE status = 'in_progress'`); err != nil {
+		return fmt.Errorf("migrate in-progress tags: %w", err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO todo_tags (todo_id, tag_id, tag_order)
+		SELECT id, (SELECT id FROM tags WHERE name = '已完成' ORDER BY id LIMIT 1), 0
+		FROM todos WHERE status = 'done'`); err != nil {
+		return fmt.Errorf("migrate completed tags: %w", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE todos_new (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER,
+		title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+		priority INTEGER NOT NULL DEFAULT 0, due_date TEXT,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		completed_at DATETIME)`); err != nil {
+		return fmt.Errorf("create migrated todos table: %w", err)
+	}
+	if _, err := db.Exec(`INSERT INTO todos_new (id, parent_id, title, description, priority, due_date, created_at, completed_at)
+		SELECT id, parent_id, title, description, priority, due_date, created_at, completed_at FROM todos`); err != nil {
+		return fmt.Errorf("copy migrated todos: %w", err)
+	}
+	if _, err := db.Exec(`DROP TABLE todos`); err != nil {
+		return fmt.Errorf("remove legacy todos table: %w", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE todos_new RENAME TO todos`); err != nil {
+		return fmt.Errorf("rename migrated todos table: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_todos_parent ON todos(parent_id)`); err != nil {
+		return fmt.Errorf("index migrated todos parent: %w", err)
+	}
+	return nil
 }
 
 func hasColumn(db *sql.DB, table, column string) (bool, error) {

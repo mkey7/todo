@@ -24,7 +24,7 @@ func AnalyzeDaily(db *sql.DB, date string) (DailyResult, error) {
 	if err != nil {
 		return DailyResult{}, err
 	}
-	active, err := activeTodoCount(db, date)
+	active, err := activeTodoCount(db)
 	if err != nil {
 		return DailyResult{}, err
 	}
@@ -43,7 +43,7 @@ func AnalyzeDaily(db *sql.DB, date string) (DailyResult, error) {
 	}
 	res.TotalDuration = tutil.FormatDuration(res.TotalSeconds)
 
-	res.GroupBreakdown, err = buildGroupBreakdown(db, entries, res.TotalSeconds)
+	res.TagBreakdown, err = buildTagBreakdown(db, entries, res.TotalSeconds)
 	if err != nil {
 		return DailyResult{}, err
 	}
@@ -111,19 +111,19 @@ func buildTodoBreakdown(entries []models.TimeEntry, total float64) []TodoStat {
 	return out
 }
 
-func buildGroupBreakdown(db *sql.DB, entries []models.TimeEntry, total float64) ([]GroupStat, error) {
-	groups, err := collectGroups(db, entries)
+func buildTagBreakdown(db *sql.DB, entries []models.TimeEntry, total float64) ([]TagStat, error) {
+	tags, err := collectTags(db, entries)
 	if err != nil {
 		return nil, err
 	}
-	sort.SliceStable(groups, func(i, j int) bool { return groups[i].Seconds > groups[j].Seconds })
-	for i := range groups {
-		groups[i].Duration = tutil.FormatDuration(groups[i].Seconds)
+	sort.SliceStable(tags, func(i, j int) bool { return tags[i].Seconds > tags[j].Seconds })
+	for i := range tags {
+		tags[i].Duration = tutil.FormatDuration(tags[i].Seconds)
 		if total > 0 {
-			groups[i].Percent = (groups[i].Seconds / total) * 100
+			tags[i].Percent = (tags[i].Seconds / total) * 100
 		}
 	}
-	return groups, nil
+	return tags, nil
 }
 
 func buildPartOfDay(entries []models.TimeEntry, total float64) []PartOfDayStat {
@@ -167,7 +167,7 @@ func distributeEntryByHour(e models.TimeEntry, fn func(hour int, seconds float64
 	if e.EndTime != nil {
 		endT = tutil.ParseStorage(*e.EndTime)
 	} else {
-		endT = nowTime()
+		endT = time.Now()
 	}
 	if !endT.After(start) {
 		return
@@ -239,9 +239,9 @@ func dailySummaryText(r DailyResult) string {
 	if r.CompletedTodos > 0 {
 		parts = append(parts, fmt.Sprintf("完成任务 %d 个。", r.CompletedTodos))
 	}
-	if len(r.GroupBreakdown) > 0 {
-		g := r.GroupBreakdown[0]
-		parts = append(parts, fmt.Sprintf("主要投入在标签「%s」(%.0f%%)。", g.GroupName, g.Percent))
+	if len(r.TagBreakdown) > 0 {
+		g := r.TagBreakdown[0]
+		parts = append(parts, fmt.Sprintf("主要投入在标签「%s」(%.0f%%)。", g.TagName, g.Percent))
 	}
 	if r.LongestFocus != nil && r.LongestFocus.Seconds >= 60 {
 		parts = append(parts, fmt.Sprintf("最长连续专注 %s。", r.LongestFocus.Duration))
@@ -270,9 +270,11 @@ func dailySummaryText(r DailyResult) string {
 
 // --- helpers ---
 
-func activeTodoCount(db *sql.DB, date string) (int, error) {
+func activeTodoCount(db *sql.DB) (int, error) {
 	var n int
-	err := db.QueryRow(`SELECT COUNT(*) FROM todos WHERE status != 'done' AND parent_id IS NULL`).Scan(&n)
+	err := db.QueryRow(`SELECT COUNT(*) FROM todos t WHERE t.parent_id IS NULL AND NOT EXISTS (
+		SELECT 1 FROM todo_tags tt JOIN tags g ON g.id = tt.tag_id
+		WHERE tt.todo_id = t.id AND g.name = '已完成')`).Scan(&n)
 	return n, err
 }
 

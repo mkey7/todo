@@ -2,8 +2,8 @@ package models
 
 import "database/sql"
 
-// Group is a tag used to classify todos and time entries.
-type Group struct {
+// Tag classifies todos and time entries.
+type Tag struct {
 	ID          int64  `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
@@ -19,14 +19,13 @@ type Todo struct {
 	ParentID    *int64  `json:"parent_id"`
 	Title       string  `json:"title"`
 	Description string  `json:"description"`
-	Status      string  `json:"status"` // pending | in_progress | done
 	Priority    int     `json:"priority"`
 	DueDate     *string `json:"due_date"`
 	CreatedAt   string  `json:"created_at"`
 	CompletedAt *string `json:"completed_at"`
 
 	// joined/display fields
-	Tags   []Group `json:"tags,omitempty"`
+	Tags   []Tag   `json:"tags,omitempty"`
 	TagIDs []int64 `json:"tag_ids,omitempty"`
 	// InheritedTagIDs are supplied for display only; TagIDs always contains the
 	// effective tag set, including any tags inherited from a parent task.
@@ -50,7 +49,7 @@ type TimeEntry struct {
 	TodoTitle string `json:"todo_title,omitempty"`
 	// TodoPrimaryColor is the color of the todo's first tag, used by timelines.
 	TodoPrimaryColor string  `json:"todo_primary_color,omitempty"`
-	Tags             []Group `json:"tags,omitempty"`
+	Tags             []Tag   `json:"tags,omitempty"`
 	TagIDs           []int64 `json:"tag_ids,omitempty"`
 }
 

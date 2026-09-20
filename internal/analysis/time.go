@@ -17,8 +17,3 @@ func nowSeconds() float64 {
 	t := time.Now()
 	return float64(t.Unix()) + float64(t.Nanosecond())/1e9
 }
-
-// nowTime returns the current local time.
-func nowTime() time.Time {
-	return time.Now()
-}

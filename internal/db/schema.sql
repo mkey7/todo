@@ -19,7 +19,6 @@ CREATE TABLE IF NOT EXISTS todos (
     parent_id    INTEGER,
     title        TEXT    NOT NULL,
     description  TEXT    NOT NULL DEFAULT '',
-    status       TEXT    NOT NULL DEFAULT 'pending',
     priority     INTEGER NOT NULL DEFAULT 0,
     due_date     TEXT,
     created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -52,7 +51,6 @@ CREATE TABLE IF NOT EXISTS weekly_summaries (
 
 
 CREATE INDEX IF NOT EXISTS idx_todos_parent       ON todos(parent_id);
-CREATE INDEX IF NOT EXISTS idx_todos_status       ON todos(status);
 CREATE INDEX IF NOT EXISTS idx_time_entries_start ON time_entries(start_time);
 CREATE INDEX IF NOT EXISTS idx_time_entries_todo  ON time_entries(todo_id);
 CREATE INDEX IF NOT EXISTS idx_todo_tags_tag ON todo_tags(tag_id);

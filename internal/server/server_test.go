@@ -37,24 +37,24 @@ func do(t *testing.T, method, url string, body any) *http.Response {
 	return resp
 }
 
-func TestAPICreateGroupAndTodo(t *testing.T) {
+func TestAPICreateTagAndTodo(t *testing.T) {
 	s := newTestServer(t)
 	defer s.Close()
 
-	// create a group
-	resp := do(t, "POST", s.URL+"/api/groups", map[string]any{"name": "开发", "color": "#6366f1"})
+	// create a tag
+	resp := do(t, "POST", s.URL+"/api/tags", map[string]any{"name": "开发", "color": "#6366f1"})
 	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("create group status = %d", resp.StatusCode)
+		t.Fatalf("create tag status = %d", resp.StatusCode)
 	}
 	var g map[string]any
 	json.NewDecoder(resp.Body).Decode(&g)
 	resp.Body.Close()
 	if g["name"] != "开发" {
-		t.Errorf("group name = %v", g["name"])
+		t.Errorf("tag name = %v", g["name"])
 	}
 	gid := int64(g["id"].(float64))
 
-	// create a todo in that group
+	// create a todo with that tag
 	resp = do(t, "POST", s.URL+"/api/todos", map[string]any{"title": "写文档", "tag_ids": []int64{gid}})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create todo status = %d", resp.StatusCode)

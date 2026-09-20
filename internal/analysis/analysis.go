@@ -14,7 +14,7 @@ type DailyResult struct {
 	EntryCount      int             `json:"entry_count"`
 	CompletedTodos  int             `json:"completed_todos"`
 	ActiveTodoCount int             `json:"active_todo_count"`
-	GroupBreakdown  []GroupStat     `json:"group_breakdown"`
+	TagBreakdown    []TagStat       `json:"tag_breakdown"`
 	TodoBreakdown   []TodoStat      `json:"todo_breakdown"`
 	PartOfDay       []PartOfDayStat `json:"part_of_day"`
 	LongestFocus    *FocusBlock     `json:"longest_focus"`
@@ -24,14 +24,14 @@ type DailyResult struct {
 	Summary         string          `json:"summary"` // human-readable one-liner
 }
 
-// GroupStat is the time spent in one group.
-type GroupStat struct {
-	GroupID    int64   `json:"group_id"`
-	GroupName  string  `json:"group_name"`
-	GroupColor string  `json:"group_color"`
-	Seconds    float64 `json:"seconds"`
-	Duration   string  `json:"duration"`
-	Percent    float64 `json:"percent"`
+// TagStat is the time spent in one tag.
+type TagStat struct {
+	TagID    int64   `json:"tag_id"`
+	TagName  string  `json:"tag_name"`
+	TagColor string  `json:"tag_color"`
+	Seconds  float64 `json:"seconds"`
+	Duration string  `json:"duration"`
+	Percent  float64 `json:"percent"`
 }
 
 // TodoStat is the time attributed to one task. Unlinked time is grouped as
@@ -78,15 +78,15 @@ type DayComparison struct {
 
 // WeeklyResult is the rule-based analysis output for a week.
 type WeeklyResult struct {
-	WeekStart      string      `json:"week_start"`
-	WeekLabel      string      `json:"week_label"`
-	TotalSeconds   float64     `json:"total_seconds"`
-	TotalDuration  string      `json:"total_duration"`
-	EntryCount     int         `json:"entry_count"`
-	CompletedTodos int         `json:"completed_todos"`
-	GroupBreakdown []GroupStat `json:"group_breakdown"`
-	TodoBreakdown  []TodoStat  `json:"todo_breakdown"`
-	DailyTrend     []DayStat   `json:"daily_trend"`
+	WeekStart      string     `json:"week_start"`
+	WeekLabel      string     `json:"week_label"`
+	TotalSeconds   float64    `json:"total_seconds"`
+	TotalDuration  string     `json:"total_duration"`
+	EntryCount     int        `json:"entry_count"`
+	CompletedTodos int        `json:"completed_todos"`
+	TagBreakdown   []TagStat  `json:"tag_breakdown"`
+	TodoBreakdown  []TodoStat `json:"todo_breakdown"`
+	DailyTrend     []DayStat  `json:"daily_trend"`
 	// WeeklyEntries is the flat list of the week's time entries, used by the
 	// frontend to render the 7-day parallel timeline. Each per-day timeline
 	// clips these entries to its own day, so cross-midnight entries render
@@ -115,11 +115,11 @@ type WeekCompare struct {
 	Duration        string  `json:"duration"`
 }
 
-// collectGroups attributes each entry equally across all tags on its todo.
-// A manually-recorded entry uses its selected legacy group as a single tag.
+// collectTags attributes each entry equally across all tags on its todo.
+// A manually-recorded entry uses its selected tag as a single tag.
 // Splitting avoids multi-tag entries inflating total percentages above 100%.
-func collectGroups(db *sql.DB, entries []models.TimeEntry) ([]GroupStat, error) {
-	byID := map[int64]*GroupStat{}
+func collectTags(db *sql.DB, entries []models.TimeEntry) ([]TagStat, error) {
+	byID := map[int64]*TagStat{}
 	var order []int64
 	for _, e := range entries {
 		tags, err := entryTags(db, e)
@@ -127,31 +127,31 @@ func collectGroups(db *sql.DB, entries []models.TimeEntry) ([]GroupStat, error) 
 			return nil, err
 		}
 		if len(tags) == 0 {
-			tags = []models.Group{{Name: "未标记", Color: "#9ca3af"}}
+			tags = []models.Tag{{Name: "未标记", Color: "#9ca3af"}}
 		}
 		sec := entrySeconds(e) / float64(len(tags))
 		for _, tag := range tags {
 			if st, ok := byID[tag.ID]; ok {
 				st.Seconds += sec
 			} else {
-				byID[tag.ID] = &GroupStat{GroupID: tag.ID, GroupName: tag.Name, GroupColor: tag.Color, Seconds: sec}
+				byID[tag.ID] = &TagStat{TagID: tag.ID, TagName: tag.Name, TagColor: tag.Color, Seconds: sec}
 				order = append(order, tag.ID)
 			}
 		}
 	}
-	out := make([]GroupStat, 0, len(order))
+	out := make([]TagStat, 0, len(order))
 	for _, id := range order {
 		out = append(out, *byID[id])
 	}
 	return out, nil
 }
 
-func entryTags(db *sql.DB, e models.TimeEntry) ([]models.Group, error) {
+func entryTags(db *sql.DB, e models.TimeEntry) ([]models.Tag, error) {
 	if e.TodoID == nil {
 		if e.TagID == nil {
 			return nil, nil
 		}
-		var g models.Group
+		var g models.Tag
 		err := db.QueryRow(`SELECT id, name, color, include_in_stats, COALESCE(created_at, '') FROM tags WHERE id = ? AND include_in_stats = 1`, *e.TagID).
 			Scan(&g.ID, &g.Name, &g.Color, new(bool), &g.CreatedAt)
 		if err == sql.ErrNoRows {
@@ -160,7 +160,7 @@ func entryTags(db *sql.DB, e models.TimeEntry) ([]models.Group, error) {
 		if err != nil {
 			return nil, err
 		}
-		return []models.Group{g}, nil
+		return []models.Tag{g}, nil
 	}
 	rows, err := db.Query(`SELECT g.id, g.name, g.color, g.include_in_stats, COALESCE(g.created_at, '')
 		FROM todo_tags tt JOIN tags g ON g.id = tt.tag_id WHERE tt.todo_id = ? AND g.include_in_stats = 1 ORDER BY tt.tag_order, tt.tag_id`, *e.TodoID)
@@ -171,9 +171,9 @@ func entryTags(db *sql.DB, e models.TimeEntry) ([]models.Group, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var tags []models.Group
+	var tags []models.Tag
 	for rows.Next() {
-		var g models.Group
+		var g models.Tag
 		if err := rows.Scan(&g.ID, &g.Name, &g.Color, new(bool), &g.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -182,11 +182,11 @@ func entryTags(db *sql.DB, e models.TimeEntry) ([]models.Group, error) {
 	return tags, rows.Err()
 }
 
-func legacyEntryTag(e models.TimeEntry) []models.Group {
+func legacyEntryTag(e models.TimeEntry) []models.Tag {
 	if e.TagID == nil {
 		return nil
 	}
-	return []models.Group{{ID: *e.TagID, Name: e.TagName, Color: e.TagColor}}
+	return []models.Tag{{ID: *e.TagID, Name: e.TagName, Color: e.TagColor}}
 }
 
 // entrySeconds returns the duration of an entry in seconds. An open entry is

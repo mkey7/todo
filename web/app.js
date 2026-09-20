@@ -45,16 +45,15 @@ async function api(method, path, body) {
 
 // ---------- state ----------
 const state = {
-  groups: [],
+  tags: [],
   todos: [],
   activeEntry: null,
-  currentGroup: '',
+  currentTag: '',
   view: 'today',
   timelineDate: todayStr(),
   analysisScope: 'daily',
   analysisDate: todayStr(),
   analysisWeek: '',
-  todayShowDone: false,    // 任务列表是否显示已完成
   todayTaskTag: '',
   timelineZoom: '12h',     // '24h' | configured work range
   weekHourPx: 90,          // weekly vertical timeline: pixels per hour (zoom)
@@ -68,26 +67,33 @@ const state = {
   timelineWorkEnd: Number(localStorage.getItem('todo-timeline-work-end') || 21),
 };
 
-function groupColor(id) {
-  const g = state.groups.find(x => x.id === id);
-  return g ? g.color : '#9ca3af';
+function tagColor(id) {
+  const tag = state.tags.find(x => x.id === id);
+  return tag ? tag.color : '#9ca3af';
 }
-function groupName(id) {
-  const g = state.groups.find(x => x.id === id);
-  return g ? g.name : '未分组';
+function tagName(id) {
+  const tag = state.tags.find(x => x.id === id);
+  return tag ? tag.name : '未标记';
 }
 function entryColor(entry) {
-  return entry.todo_primary_color || groupColor(entry.tag_id);
+  return entry.todo_primary_color || tagColor(entry.tag_id);
 }
 function tagIDByName(name) {
-  const tag = state.groups.find(t => t.name === name);
+  const tag = state.tags.find(t => t.name === name);
   return tag ? tag.id : null;
 }
+function todoHasTag(todo, name) {
+  const id = tagIDByName(name);
+  return id != null && (todo.tag_ids || []).includes(id);
+}
+const todoIsDone = todo => todoHasTag(todo, '已完成');
+const todoIsInProgress = todo => todoHasTag(todo, '进行中');
+const todoStatusLabel = todo => todoIsDone(todo) ? '已完成' : todoIsInProgress(todo) ? '进行中' : '未开始';
 async function ensureTag(name, color) {
   const id = tagIDByName(name);
   if (id) return id;
   const tag = await api('POST', '/api/tags', { name, description: '系统状态标签', color, include_in_stats: false });
-  await loadGroups();
+  await loadTags();
   return tag.id;
 }
 function entryTitle(entry) {
@@ -103,7 +109,7 @@ async function init() {
   bindTodos();
   bindAnalysis();
   bindModal();
-  await loadGroups();
+  await loadTags();
   await loadTodos();
   await refreshActiveEntry();
   renderView('today');
@@ -177,11 +183,11 @@ function timelineRange(zoom) {
 }
 
 // ---------- data loaders ----------
-async function loadGroups() {
-  state.groups = await api('GET', '/api/tags');
-  if (state.groups.length === 0) {
+async function loadTags() {
+  state.tags = await api('GET', '/api/tags');
+  if (state.tags.length === 0) {
     await api('POST', '/api/tags', { name: '默认', description: '默认标签', color: '#6366f1' });
-    state.groups = await api('GET', '/api/tags');
+    state.tags = await api('GET', '/api/tags');
   }
 }
 async function loadTodos() {
@@ -206,7 +212,7 @@ function bindToday() {
   // 补录
   $('#bf-add').addEventListener('click', onBackfillAdd);
   // 任务与分组
-  $('#today-add-group').addEventListener('click', () => openGroupModal(null));
+  $('#today-add-group').addEventListener('click', () => openTagModal(null));
   $('#today-add-todo').addEventListener('click', () => openTodoModal(null));
   $('#today-task-filter').addEventListener('change', e => { state.todayTaskTag = e.target.value; renderTodayTasks(); });
   $('#today-quick-add').addEventListener('click', () => openTodoModal(null));
@@ -232,17 +238,17 @@ async function renderToday() {
 // 填充补录任务下拉
 function renderRecorder() {
   const progressID = tagIDByName('进行中');
-  fillGroupSelect($('#bf-group'), progressID);
+  fillTagSelect($('#bf-group'), progressID);
   $('#bf-group').value = progressID ? String(progressID) : '';
   fillTodoSelect($('#bf-todo'), null, $('#bf-group').value ? Number($('#bf-group').value) : null);
   if (!$('#bf-date').value) { $('#bf-date').value = todayStr(); $('#bf-end-date').value = todayStr(); }
   renderTimer();
 }
 
-function fillGroupSelect(sel, selectedId) {
+function fillTagSelect(sel, selectedId) {
   const prev = sel.value;
   sel.innerHTML = '<option value="">全部标签</option>';
-  for (const g of state.groups) {
+  for (const g of state.tags) {
     const opt = el('option', { value: g.id }, g.name);
     if (selectedId && Number(selectedId) === g.id) opt.selected = true;
     sel.appendChild(opt);
@@ -256,18 +262,18 @@ function fillTodoSelect(sel, selectedId, groupId) {
 
   // Flatten the todo tree: top-level + children recursively
   const flatList = [];
-  function walk(todos, depth, parentGroupId) {
+  function walk(todos, depth, parentTagId) {
     for (const t of todos) {
-      // For sub-tasks, use the parent's group_id for filtering
-      const effectiveGroupId = t.parent_id ? (parentGroupId ?? (t.tag_ids || [])[0]) : (t.tag_ids || [])[0];
-      const tagIDs = t.tag_ids || (effectiveGroupId ? [effectiveGroupId] : []);
+      // For sub-tasks, use the parent's primary tag for filtering
+      const effectiveTagId = t.parent_id ? (parentTagId ?? (t.tag_ids || [])[0]) : (t.tag_ids || [])[0];
+      const tagIDs = t.tag_ids || (effectiveTagId ? [effectiveTagId] : []);
       if (groupId != null) {
         if (!tagIDs.includes(groupId)) continue;
       }
       const indent = depth > 0 ? '  '.repeat(depth) + '└ ' : '';
       const hasKids = t.children && t.children.length;
       const label = indent + t.title + (hasKids && depth === 0 ? ' …' : '');
-      flatList.push({ id: t.id, label, groupId: effectiveGroupId });
+      flatList.push({ id: t.id, label, tagId: effectiveTagId });
       if (t.children && t.children.length) {
         walk(t.children, depth + 1, (t.tag_ids || [])[0]);
       }
@@ -307,7 +313,7 @@ function renderNavTimer() {
   const active = state.activeEntry;
   wrap.classList.toggle('hidden', !active);
   if (!active) return;
-  $('#nav-active-timer-title').textContent = active.todo_title || groupName(active.tag_id);
+  $('#nav-active-timer-title').textContent = active.todo_title || tagName(active.tag_id);
   updateElapsed();
 }
 function updateElapsed() {
@@ -423,38 +429,36 @@ async function renderTodayEntries() {
     return sum + Math.max(0, (end - start) / 1000);
   }, 0);
   host.appendChild(buildWeekTimeline([{
-    date: todayStr(), weekday: '今日', seconds, duration: tutilFormatDuration(seconds),
+    date: todayStr(), weekday: '今日', seconds, duration: fmtDurationSecs(seconds),
   }], entries, '24h'));
 }
 
-// 今日看板按所选标签展示任务；若仅子任务匹配，保留其父级以显示层级。
+// 任务看板只展示带“进行中”标签的任务；下拉框用于进一步按标签筛选。
+// 若仅子任务匹配，保留其父级以显示层级。
 function renderTodayTasks() {
+  const progressID = tagIDByName('进行中');
   const filterTree = (todos) => todos.flatMap(t => {
     const children = filterTree(t.children || []);
-    const matchesTag = !state.todayTaskTag || (t.tag_ids || []).includes(Number(state.todayTaskTag));
-    if (!matchesTag && children.length === 0) return [];
+    const tagIDs = t.tag_ids || [];
+    const isInProgress = progressID != null && tagIDs.includes(progressID);
+    const matchesTag = !state.todayTaskTag || tagIDs.includes(Number(state.todayTaskTag));
+    if ((!isInProgress || !matchesTag) && children.length === 0) return [];
     return [{ ...t, children }];
   });
   const filter = $('#today-task-filter');
-  filter.innerHTML = '<option value="">全部标签</option>';
-  for (const tag of state.groups) filter.appendChild(el('option', { value: tag.id }, tag.name));
+  filter.innerHTML = '<option value="">全部进行中任务</option>';
+  for (const tag of state.tags) {
+    if (tag.id !== progressID) filter.appendChild(el('option', { value: tag.id }, tag.name));
+  }
   filter.value = state.todayTaskTag;
   const host = $('#today-tasks');
   host.innerHTML = '';
   const items = filterTree(state.todos);
-  const activeItems = items.filter(t => t.status !== 'done');
-  const doneItems = items.filter(t => t.status === 'done');
-
   if (items.length === 0) {
-    host.appendChild(emptyHint('暂无匹配标签的任务'));
+    host.appendChild(emptyHint('暂无进行中的任务'));
     return;
   }
-  for (const t of activeItems) host.appendChild(buildTodoRow(t, false));
-  if (doneItems.length) {
-    const completed = el('details', { class: 'today-completed' }, el('summary', {}, `已完成任务 (${doneItems.length})`));
-    for (const t of doneItems) completed.appendChild(buildTodoRow(t, false));
-    host.appendChild(completed);
-  }
+  for (const t of items) host.appendChild(buildTodoRow(t, false));
 }
 
 async function toggleTodoToday(todo) {
@@ -465,7 +469,6 @@ async function toggleTodoToday(todo) {
     await api('PUT', '/api/todos/' + todo.id, {
       title: todo.title,
       description: todo.description,
-      status: todo.status,
       priority: todo.priority,
       due_date: todo.due_date,
       parent_id: todo.parent_id,
@@ -484,14 +487,14 @@ function renderTodayOverview(r) {
   const host = $('#today-overview');
   host.innerHTML = '';
   const totalTasks = countTodoTree(state.todos);
-  const doneTasks = countTodoTree(state.todos, t => t.status === 'done');
-  const activeTasks = countTodoTree(state.todos, t => t.status === 'in_progress');
+  const doneTasks = countTodoTree(state.todos, todoIsDone);
+  const activeTasks = countTodoTree(state.todos, todoIsInProgress);
   const completion = totalTasks ? Math.round(doneTasks / totalTasks * 100) : 0;
   const grid = el('div', { class: 'overview-grid' });
   [['总工时', r.total_duration], ['任务', `${doneTasks}/${totalTasks}`], ['完成率', completion + '%'], ['对比昨日', r.vs_yesterday ? (r.vs_yesterday.delta_seconds >= 0 ? '+' : '') + r.vs_yesterday.duration : '—'], ['最长专注', r.longest_focus ? r.longest_focus.duration : '—'], ['进行中', String(activeTasks)]]
     .forEach(([label, value]) => grid.appendChild(el('div', { class: 'overview-stat' }, el('div', { class: 'label' }, label), el('div', { class: 'value' }, value))));
   host.appendChild(grid);
-  host.appendChild(el('div', { class: 'overview-section' }, el('h4', {}, '标签分布'), buildPieChart(r.group_breakdown)));
+  host.appendChild(el('div', { class: 'overview-section' }, el('h4', {}, '标签分布'), buildPieChart(r.tag_breakdown)));
 }
 
 function renderTodayInsights(r, weekly) {
@@ -503,8 +506,8 @@ function renderTodayInsights(r, weekly) {
 
 function updateDashboardKPIs(r, weekly) {
   const total = countTodoTree(state.todos);
-  const done = countTodoTree(state.todos, t => t.status === 'done');
-  const active = countTodoTree(state.todos, t => t.status === 'in_progress');
+  const done = countTodoTree(state.todos, todoIsDone);
+  const active = countTodoTree(state.todos, todoIsInProgress);
   const score = total ? Math.round(done / total * 60 + Math.min(40, r.total_seconds / 3600 * 10)) : 0;
   $('#kpi-date').textContent = todayStr().slice(5);
   $('#kpi-hours').textContent = r.total_duration;
@@ -525,9 +528,7 @@ function updateDashboardKPIs(r, weekly) {
 //  TODOS
 // ============================================================
 function bindTodos() {
-  $('#add-group-btn').addEventListener('click', () => openGroupModal(null));
-  $('#save-group-btn').addEventListener('click', saveGroup);
-  $('#cancel-group-btn').addEventListener('click', () => $('#group-editor').classList.add('hidden'));
+  $('#add-group-btn').addEventListener('click', () => openTagModal(null));
   $('#add-todo-btn').addEventListener('click', () => openTodoModal(null));
 }
 
@@ -536,20 +537,20 @@ function renderTodos() {
   const ul = $('#group-list');
   ul.innerHTML = '';
   const all = el('li', {
-    class: 'group-item' + (state.currentGroup === '' ? ' active' : ''),
-    onclick: () => { state.currentGroup = ''; state.todoTagIDs = []; state.todoExcludedTagIDs = []; renderTodos(); },
+    class: 'group-item' + (state.currentTag === '' ? ' active' : ''),
+    onclick: () => { state.currentTag = ''; state.todoTagIDs = []; state.todoExcludedTagIDs = []; renderTodos(); },
   }, el('span', { class: 'dot', style: 'background:#9ca3af' }), '全部');
   ul.appendChild(all);
-  for (const g of state.groups) {
+  for (const g of state.tags) {
     const li = el('li', {
-      class: 'group-item' + (state.currentGroup == String(g.id) ? ' active' : ''),
-      onclick: () => { state.currentGroup = String(g.id); state.todoTagIDs = [g.id]; state.todoExcludedTagIDs = []; renderTodos(); },
+      class: 'group-item' + (state.currentTag == String(g.id) ? ' active' : ''),
+      onclick: () => { state.currentTag = String(g.id); state.todoTagIDs = [g.id]; state.todoExcludedTagIDs = []; renderTodos(); },
     });
     li.appendChild(el('span', { class: 'dot', style: `background:${g.color}` }));
     li.appendChild(document.createTextNode(g.name));
     const actions = el('span', { class: 'g-actions' });
-    actions.appendChild(el('button', { class: 'btn btn-small', onclick: (e) => { e.stopPropagation(); openGroupModal(g); } }, '改'));
-    actions.appendChild(el('button', { class: 'btn btn-small btn-danger', onclick: async (e) => { e.stopPropagation(); if (confirm('删除标签？关联任务将移除该标签')) { await api('DELETE', '/api/tags/' + g.id); state.currentGroup=''; state.todoTagIDs = state.todoTagIDs.filter(id => id !== g.id); state.todoExcludedTagIDs = state.todoExcludedTagIDs.filter(id => id !== g.id); await loadGroups(); await loadTodos(); renderTodos(); } } }, '×'));
+    actions.appendChild(el('button', { class: 'btn btn-small', onclick: (e) => { e.stopPropagation(); openTagModal(g); } }, '改'));
+    actions.appendChild(el('button', { class: 'btn btn-small btn-danger', onclick: async (e) => { e.stopPropagation(); if (confirm('删除标签？关联任务将移除该标签')) { await api('DELETE', '/api/tags/' + g.id); state.currentTag=''; state.todoTagIDs = state.todoTagIDs.filter(id => id !== g.id); state.todoExcludedTagIDs = state.todoExcludedTagIDs.filter(id => id !== g.id); await loadTags(); await loadTodos(); renderTodos(); } } }, '×'));
     li.appendChild(actions);
     ul.appendChild(li);
   }
@@ -569,8 +570,8 @@ function renderTodos() {
 
   // Apply status filter
   if (state.todoFilter === 'today') filtered = filtered.filter(t => (t.tag_ids || []).includes(tagIDByName('进行中')));
-  else if (state.todoFilter === 'pending') filtered = filtered.filter(t => t.status !== 'done');
-  else if (state.todoFilter === 'done') filtered = filtered.filter(t => t.status === 'done');
+  else if (state.todoFilter === 'pending') filtered = filtered.filter(t => !todoIsDone(t));
+  else if (state.todoFilter === 'done') filtered = filtered.filter(todoIsDone);
 
   // Apply sort by created_at
   filtered = [...filtered].sort((a, b) => {
@@ -621,7 +622,7 @@ function buildTodoTagFilter() {
   wrap.appendChild(rule);
 
   const tags = el('div', { class: 'todo-tag-options', 'aria-label': '选择标签' });
-  for (const tag of state.groups) {
+  for (const tag of state.tags) {
     const selected = state.todoTagIDs.includes(tag.id);
     const excluded = state.todoExcludedTagIDs.includes(tag.id);
     tags.appendChild(el('button', {
@@ -632,7 +633,7 @@ function buildTodoTagFilter() {
         if (!selected && !excluded) state.todoTagIDs = [...state.todoTagIDs, tag.id];
         else if (selected) { state.todoTagIDs = state.todoTagIDs.filter(id => id !== tag.id); state.todoExcludedTagIDs = [...state.todoExcludedTagIDs, tag.id]; }
         else state.todoExcludedTagIDs = state.todoExcludedTagIDs.filter(id => id !== tag.id);
-        state.currentGroup = state.todoTagIDs.length === 1 ? String(state.todoTagIDs[0]) : '';
+        state.currentTag = state.todoTagIDs.length === 1 ? String(state.todoTagIDs[0]) : '';
         renderTodos();
       },
     }, el('i', { style: `background:${tag.color}` }), tag.name));
@@ -641,7 +642,7 @@ function buildTodoTagFilter() {
   if (state.todoTagIDs.length || state.todoExcludedTagIDs.length) {
     wrap.appendChild(el('button', {
       class: 'btn btn-small',
-      onclick: () => { state.todoTagIDs = []; state.todoExcludedTagIDs = []; state.currentGroup = ''; renderTodos(); },
+      onclick: () => { state.todoTagIDs = []; state.todoExcludedTagIDs = []; state.currentTag = ''; renderTodos(); },
     }, '清除标签'));
   }
   return wrap;
@@ -680,18 +681,19 @@ function buildTodoFilterBar() {
 }
 
 function buildTodoRow(t, compact) {
-  const item = el('div', { class: 'todo-item' + (t.status === 'done' ? ' done' : '') });
+  const done = todoIsDone(t);
+  const item = el('div', { class: 'todo-item' + (done ? ' done' : '') });
   if (state.view === 'today' && !t.parent_id) bindTodayTaskDrag(item, t);
   const row = el('div', { class: 'todo-row' });
   const check = el('div', {
-    class: 'todo-check' + (t.status === 'done' ? ' done' : ''),
+    class: 'todo-check' + (done ? ' done' : ''),
     onclick: async () => {
-      const next = t.status === 'done' ? 'pending' : 'done';
+      const next = done ? 'pending' : 'done';
       await api('PATCH', '/api/todos/' + t.id + '/status', { status: next });
       await loadTodos();
       renderView(state.view);
     },
-  }, t.status === 'done' ? '✓' : '');
+  }, done ? '✓' : '');
   row.appendChild(check);
   const main = el('div', { class: 'todo-main' });
   const titleEl = el('div', { class: 'todo-title clickable' }, t.title);
@@ -747,7 +749,7 @@ function bindTodayTaskDrag(item, todo) {
     const to = state.todos.findIndex(x => x.id === todo.id);
     if (from < 0 || to < 0 || from === to) return;
     const [moved] = state.todos.splice(from, 1); state.todos.splice(to, 0, moved);
-    await Promise.all(state.todos.map((task, index) => api('PUT', '/api/todos/' + task.id, { title: task.title, description: task.description, status: task.status, priority: state.todos.length - index, due_date: task.due_date, parent_id: task.parent_id, tag_ids: task.tag_ids })));
+    await Promise.all(state.todos.map((task, index) => api('PUT', '/api/todos/' + task.id, { title: task.title, description: task.description, priority: state.todos.length - index, due_date: task.due_date, parent_id: task.parent_id, tag_ids: task.tag_ids })));
     await loadTodos(); renderTodayTasks();
   });
 }
@@ -793,7 +795,7 @@ async function renderInlineAnalysis(t, container) {
     const grid = el('div', { class: 'stat-grid', style: 'margin-bottom:16px' });
     grid.appendChild(statCard('累计总工时', totalDur, allEntries.length + ' 条记录'));
     grid.appendChild(statCard('本月工时', fmtDurationSecs(monthSecs), monthEntries.length + ' 条记录'));
-    grid.appendChild(statCard('子任务数', String(descCount), statusLabel(t.status)));
+    grid.appendChild(statCard('子任务数', String(descCount), todoStatusLabel(t)));
     container.appendChild(grid);
 
     // Monthly heatmap with navigation
@@ -923,30 +925,6 @@ function fmtDurationSecs(secs) {
   return Math.floor(secs) + 's';
 }
 
-function statusLabel(s) {
-  return s === 'done' ? '已完成' : s === 'in_progress' ? '进行中' : '未开始';
-}
-
-// ---- 分组编辑 ----
-function toggleGroupEditor(group) {
-  const box = $('#group-editor');
-  box.classList.remove('hidden');
-  $('#group-name').value = group ? group.name : '';
-  $('#group-color').value = group ? group.color : '#6366f1';
-  $('#group-name').focus();
-  $('#save-group-btn').dataset.id = group ? group.id : '';
-}
-async function saveGroup() {
-  const id = $('#save-group-btn').dataset.id;
-  const body = { name: $('#group-name').value.trim(), color: $('#group-color').value, sort_order: 0 };
-  if (!body.name) return;
-  if (id) await api('PUT', '/api/tags/' + id, body);
-  else await api('POST', '/api/tags', body);
-  $('#group-editor').classList.add('hidden');
-  await loadGroups();
-  renderTodos();
-}
-
 // ============================================================
 //  ANALYSIS
 // ============================================================
@@ -991,7 +969,7 @@ function buildTimelineTrack(entries, showNow, viewDate, zoom) {
     const block = el('div', {
       class: 'tl-block',
       style: `left:${leftPct}%; width:${widthPct}%; background:${entryColor(e)}`,
-      title: `${fmtTime(e.start_time)} - ${e.end_time ? fmtTime(e.end_time) : '进行中'} · ${groupName(e.tag_id)}${e.todo_title ? ' · ' + e.todo_title : ''}`,
+      title: `${fmtTime(e.start_time)} - ${e.end_time ? fmtTime(e.end_time) : '进行中'} · ${tagName(e.tag_id)}${e.todo_title ? ' · ' + e.todo_title : ''}`,
     });
     if (isActive) {
       block.dataset.timelineActiveBlock = 'true';
@@ -1087,14 +1065,7 @@ function buildEntryRow(e, onChange) {
 }
 
 function entryDuration(e) {
-  const start = new Date(e.start_time.replace(' ', 'T')).getTime();
-  const end = e.end_time ? new Date(e.end_time.replace(' ', 'T')).getTime() : Date.now();
-  const secs = Math.max(0, Math.floor((end - start) / 1000));
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  if (h > 0) return h + 'h ' + m + 'm';
-  if (m > 0) return m + 'm';
-  return secs + 's';
+  return fmtDurationSecs(entryDurationSecs(e));
 }
 
 // ============================================================
@@ -1234,7 +1205,7 @@ function renderDailyAnalysis(r) {
     buildPieChart(r.todo_breakdown)));
   flexRow.appendChild(el('div', { class: 'card', style: 'flex:1; margin-left:16px' },
     el('h3', {}, '标签占比'),
-    buildPieChart(r.group_breakdown)));
+    buildPieChart(r.tag_breakdown)));
 
   wrap.appendChild(flexRow);
 
@@ -1284,15 +1255,15 @@ function renderWeeklyAnalysis(r) {
   breakdowns.appendChild(el('div', { class: 'card', style: 'flex:1' },
     el('h3', {}, '任务占比'), buildPieChart(r.todo_breakdown)));
   breakdowns.appendChild(el('div', { class: 'card', style: 'flex:1; margin-left:16px' },
-    el('h3', {}, '标签占比'), buildPieChart(r.group_breakdown)));
+    el('h3', {}, '标签占比'), buildPieChart(r.tag_breakdown)));
   wrap.appendChild(breakdowns);
   // Keep the editable reflection as the final section of weekly analysis.
   wrap.appendChild(buildWeeklySummaryEditor(r.week_label, r.user_summary));
   return wrap;
 }
 
-function barsFromGroups(groups) {
-  return buildPieChart(groups);
+function barsFromTags(tags) {
+  return buildPieChart(tags);
 }
 function barsFromParts(parts) {
   const wrap = el('div', {});
@@ -1301,13 +1272,13 @@ function barsFromParts(parts) {
   }
   return wrap;
 }
-function buildPieChart(groups) {
+function buildPieChart(tags) {
   const wrap = el('div', { class: 'pie-chart-wrap' });
   // Both task and tag API breakdowns share the chart renderer.
-  groups = (groups || []).map(g => ({
+  const groups = (tags || []).map(g => ({
     ...g,
-    group_name: g.group_name || g.todo_name,
-    group_color: g.group_color || g.todo_color || '#9ca3af',
+    group_name: g.tag_name || g.todo_name,
+    group_color: g.tag_color || g.todo_color || '#9ca3af',
   }));
   if (!groups || groups.length === 0 || groups.every(g => g.seconds < 1)) {
     wrap.appendChild(emptyHint('无数据'));
@@ -1343,7 +1314,7 @@ function buildPieChart(groups) {
     svg.appendChild(circle);
 
     // Center text
-    const totalDur = tutilFormatDuration(g.seconds);
+    const totalDur = fmtDurationSecs(g.seconds);
     if (totalDur) {
       const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
       text.setAttribute('x', cx);
@@ -1397,7 +1368,7 @@ function buildPieChart(groups) {
 
     // Center text
     const totalDur = groups.reduce((acc, g) => acc + g.duration.length, 0) > 0
-      ? tutilFormatDuration(groups.reduce((acc, g) => acc + g.seconds, 0))
+      ? fmtDurationSecs(groups.reduce((acc, g) => acc + g.seconds, 0))
       : '';
     if (totalDur) {
       const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -1425,14 +1396,6 @@ function buildPieChart(groups) {
   return wrap;
 }
 
-function tutilFormatDuration(secs) {
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  if (h > 0) return h + 'h ' + m + 'm';
-  if (m > 0) return m + 'm';
-  return Math.floor(secs) + 's';
-}
-
 function buildBar(name, percent, duration, color) {
   const pct = percent || 0;
   return el('div', { class: 'bar-row' },
@@ -1440,7 +1403,6 @@ function buildBar(name, percent, duration, color) {
     el('div', { class: 'bar-track' }, el('div', { class: 'bar-fill', style: `width:${Math.min(100, pct)}%; background:${color || '#6366f1'}` })),
     el('div', { class: 'pct' }, duration + ' · ' + pct.toFixed(0) + '%'));
 }
-function buildHourHistogram(entries) { /* placeholder */ }
 function buildHourBars(bins) {
   const max = Math.max(1, ...bins.map(b => b.seconds));
   const wrap = el('div', {});
@@ -1529,7 +1491,7 @@ function buildWeekTimeline(trend, entries, zoom) {
         const block = el('div', {
           class: 'week-cal-block',
           style: `--top-h:${topH.toFixed(3)};--h-h:${heightH.toFixed(3)};background:${entryColor(e)}`,
-          title: `${fmtTime(e.start_time)} - ${e.end_time ? fmtTime(e.end_time) : '进行中'} · ${groupName(e.tag_id)}${e.todo_title ? ' · ' + e.todo_title : ''}`,
+          title: `${fmtTime(e.start_time)} - ${e.end_time ? fmtTime(e.end_time) : '进行中'} · ${tagName(e.tag_id)}${e.todo_title ? ' · ' + e.todo_title : ''}`,
         });
         if (isActive) {
           block.dataset.timelineActiveBlock = 'true';
@@ -1638,7 +1600,7 @@ function openTodoModal(t) {
   const isNew = !t || !(t.id);
   const titleField = field('标题', input('text', t && t.title ? t.title : ''));
   const parent = isChild ? findTodoById(t.parent_id) : null;
-  const initialTagIDs = t && t.tag_ids ? t.tag_ids : (parent ? parent.tag_ids : (state.currentGroup ? [Number(state.currentGroup)] : []));
+  const initialTagIDs = t && t.tag_ids ? t.tag_ids : (parent ? parent.tag_ids : (state.currentTag ? [Number(state.currentTag)] : []));
   const tagsField = field('标签（第一个用于时间轴颜色）', tagSelector(initialTagIDs));
   const descField = field('描述', textarea(t && t.description ? t.description : ''));
   const prioField = field('优先级', input('number', t && t.priority != null ? t.priority : 0));
@@ -1661,7 +1623,6 @@ function openTodoModal(t) {
         description: descField.querySelector('textarea').value,
         priority: Number(prioField.querySelector('input').value || 0),
         due_date: dueField.querySelector('input').value || null,
-        status: t && t.status ? t.status : 'pending',
       };
       body.tag_ids = tagsField.querySelector('.tag-selector').getTagIDs();
       const progressID = await ensureTag('进行中', '#3b82f6');
@@ -1687,7 +1648,7 @@ function openEntryModal(e, defaultDate) {
   const endDate = e && e.end_time ? e.end_time.slice(0, 10) : startDate;
   const startTime = e ? e.start_time.slice(11, 16) : '09:00';
   const endTime = e && e.end_time ? e.end_time.slice(11, 16) : '';
-  const initialGroupId = e && e.tag_id ? e.tag_id : Number(state.currentGroup) || null;
+  const initialTagId = e && e.tag_id ? e.tag_id : Number(state.currentTag) || null;
   const initialTodoId = e && e.todo_id ? e.todo_id : null;
 
   const startDateField = field('开始日期', input('date', startDate));
@@ -1696,7 +1657,7 @@ function openEntryModal(e, defaultDate) {
   const endTimeField = field('结束时间', input('time', endTime));
 
   // Build tag and task selectors. The selected task's tags remain visible.
-  const gs = groupSelect(initialGroupId);
+  const tagSelectControl = tagSelect(initialTagId);
   const todoWrapper = el('div', { class: 'field entry-task-field' }, el('label', {}, '关联任务（可选）'));
   function buildTodoField(groupId) {
     todoWrapper.querySelectorAll('.entry-task-control').forEach(n => n.remove());
@@ -1717,8 +1678,8 @@ function openEntryModal(e, defaultDate) {
     todoWrapper.appendChild(control);
     renderTaskMeta();
   }
-  buildTodoField(initialGroupId);
-  gs.addEventListener('change', function () {
+  buildTodoField(initialTagId);
+  tagSelectControl.addEventListener('change', function () {
     const gid = this.value ? Number(this.value) : null;
     buildTodoField(gid);
   });
@@ -1732,7 +1693,7 @@ function openEntryModal(e, defaultDate) {
     el('div', { class: 'row' }, startDateField, startTimeField),
     el('div', { class: 'row' }, endDateField, endTimeField)));
   form.appendChild(el('div', { class: 'entry-editor-section' }, el('div', { class: 'entry-editor-section-title' }, '任务与标签'),
-    el('div', { class: 'field' }, el('label', {}, '记录标签'), gs), todoWrapper));
+    el('div', { class: 'field' }, el('label', {}, '记录标签'), tagSelectControl), todoWrapper));
   form.appendChild(noteField);
   const actions = el('div', { class: 'save-row' });
   if (!isNew) {
@@ -1759,7 +1720,7 @@ function openEntryModal(e, defaultDate) {
         start_time: startDt,
         end_time: endDt,
         note: noteField.querySelector('textarea').value,
-        tag_id: gs.value ? Number(gs.value) : null,
+        tag_id: tagSelectControl.value ? Number(tagSelectControl.value) : null,
         todo_id: todoWrapper.querySelector('select').value ? Number(todoWrapper.querySelector('select').value) : null,
       };
       try {
@@ -1774,10 +1735,10 @@ function openEntryModal(e, defaultDate) {
   openModal(isNew ? '补录工时' : '编辑工时', form);
 }
 
-// 新建/编辑标签弹窗（今日页与任务页共用入口，独立 DOM，不依赖 #group-editor）
-function openGroupModal(group) {
+// 新建/编辑标签弹窗（今日页与任务页共用入口）。
+function openTagModal(group) {
   const isNew = !group;
-  const nameField = field('分组名', input('text', group ? group.name : ''));
+  const nameField = field('标签名', input('text', group ? group.name : ''));
   const descriptionField = field('标签描述', textarea(group ? group.description || '' : ''));
   const colorI = el('input', { class: 'color-input', type: 'color', value: group ? group.color : '#6366f1' });
   const colorField = el('div', { class: 'field' }, el('label', {}, '颜色'), colorI);
@@ -1799,7 +1760,7 @@ function openGroupModal(group) {
         if (isNew) await api('POST', '/api/tags', body);
         else await api('PUT', '/api/tags/' + group.id, body);
         closeModal();
-        await loadGroups();
+        await loadTags();
         if (state.view === 'today') renderToday(); else renderView(state.view);
       } catch (e) { alert(e.message); }
     } }, '保存')));
@@ -1814,7 +1775,7 @@ function tagSelector(selectedIDs) {
   const render = () => {
     selectedWrap.innerHTML = '';
     selected.forEach((id, index) => {
-      const tag = state.groups.find(x => x.id === id);
+      const tag = state.tags.find(x => x.id === id);
       if (!tag) return;
       selectedWrap.appendChild(el('span', { class: 'group-tag', title: tag.description || '' },
         el('i', { style: `background:${tag.color}` }), tag.name,
@@ -1824,16 +1785,16 @@ function tagSelector(selectedIDs) {
     });
     select.innerHTML = '';
     select.appendChild(el('option', { value: '' }, '添加标签…'));
-    for (const tag of state.groups.filter(x => !selected.includes(x.id))) {
+    for (const tag of state.tags.filter(x => !selected.includes(x.id))) {
       select.appendChild(el('option', { value: tag.id }, tag.name));
     }
   };
   select.addEventListener('change', () => {
     if (!select.value) return;
     const id = Number(select.value);
-    const tag = state.groups.find(x => x.id === id);
+    const tag = state.tags.find(x => x.id === id);
     selected = selected.filter(x => {
-      const other = state.groups.find(t => t.id === x);
+      const other = state.tags.find(t => t.id === x);
       return !(tag && other && ((tag.name === '进行中' && other.name === '已完成') || (tag.name === '已完成' && other.name === '进行中')));
     });
     selected.push(id);
@@ -1861,10 +1822,10 @@ function textarea(value) {
   if (value) t.value = value;
   return t;
 }
-function groupSelect(selectedId) {
+function tagSelect(selectedId) {
   const s = el('select', { class: 'select' });
   s.appendChild(el('option', { value: '' }, '未分组'));
-  for (const g of state.groups) {
+  for (const g of state.tags) {
     const opt = el('option', { value: g.id }, g.name);
     if (selectedId && Number(selectedId) === g.id) opt.selected = true;
     s.appendChild(opt);
@@ -1877,10 +1838,10 @@ function todoSelect(selectedId, groupId) {
   // Flatten the todo tree so sub-tasks are selectable (indented under their
   // parent). Sub-tasks inherit the parent's group for filtering.
   const flatList = [];
-  function walk(todos, depth, parentGroupId) {
+  function walk(todos, depth, parentTagId) {
     for (const t of todos) {
-      const effectiveGroupId = t.parent_id ? (parentGroupId ?? (t.tag_ids || [])[0]) : (t.tag_ids || [])[0];
-      const tagIDs = t.tag_ids || (effectiveGroupId ? [effectiveGroupId] : []);
+      const effectiveTagId = t.parent_id ? (parentTagId ?? (t.tag_ids || [])[0]) : (t.tag_ids || [])[0];
+      const tagIDs = t.tag_ids || (effectiveTagId ? [effectiveTagId] : []);
       if (groupId != null) {
         if (!tagIDs.includes(groupId)) continue;
       }

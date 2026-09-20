@@ -12,9 +12,9 @@ func scanEntry(scanner interface{ Scan(...any) error }) (models.TimeEntry, error
 	var e models.TimeEntry
 	var todoID, tagID sql.NullInt64
 	var endTime, note, createdAt sql.NullString
-	var groupName, groupColor, todoTitle, todoPrimaryColor sql.NullString
+	var tagName, tagColor, todoTitle, todoPrimaryColor sql.NullString
 	err := scanner.Scan(&e.ID, &todoID, &tagID, &e.StartTime, &endTime,
-		&note, &createdAt, &groupName, &groupColor, &todoTitle, &todoPrimaryColor)
+		&note, &createdAt, &tagName, &tagColor, &todoTitle, &todoPrimaryColor)
 	if err != nil {
 		return e, err
 	}
@@ -23,18 +23,18 @@ func scanEntry(scanner interface{ Scan(...any) error }) (models.TimeEntry, error
 	e.EndTime = models.NullStr(endTime)
 	e.Note = note.String
 	e.CreatedAt = createdAt.String
-	e.TagName = groupName.String
-	e.TagColor = groupColor.String
+	e.TagName = tagName.String
+	e.TagColor = tagColor.String
 	e.TodoTitle = todoTitle.String
 	e.TodoPrimaryColor = todoPrimaryColor.String
 	return e, nil
 }
 
-// entryColumns includes joined group/todo display fields.
+// entryColumns includes joined tag/todo display fields.
 const entryColumns = `te.id, te.todo_id, te.tag_id, te.start_time, te.end_time, te.note, te.created_at,
 	g.name AS tag_name, g.color AS tag_color, t.title AS todo_title, primary_tag.color AS todo_primary_color`
 
-func entryQuery(where string, args ...any) string {
+func entryQuery(where string) string {
 	return fmt.Sprintf(`SELECT %s FROM time_entries te
 		LEFT JOIN tags g ON g.id = te.tag_id
 		LEFT JOIN todos t ON t.id = te.todo_id
@@ -45,27 +45,16 @@ func entryQuery(where string, args ...any) string {
 // ListEntriesForDay returns entries overlapping the given date.
 func ListEntriesForDay(db *sql.DB, date string) ([]models.TimeEntry, error) {
 	start, end := tutil.DayRange(date)
-	rows, err := db.Query(entryQuery(`te.start_time < ? AND (te.end_time IS NULL OR te.end_time > ?)`, end, start),
-		end, start)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var es []models.TimeEntry
-	for rows.Next() {
-		e, err := scanEntry(rows)
-		if err != nil {
-			return nil, err
-		}
-		es = append(es, e)
-	}
-	return es, rows.Err()
+	return listEntriesOverlapping(db, start, end)
 }
 
 // ListEntriesInRange returns entries overlapping [start, end) storage strings.
 func ListEntriesInRange(db *sql.DB, start, end string) ([]models.TimeEntry, error) {
-	rows, err := db.Query(entryQuery(`te.start_time < ? AND (te.end_time IS NULL OR te.end_time > ?)`, end, start),
-		end, start)
+	return listEntriesOverlapping(db, start, end)
+}
+
+func listEntriesOverlapping(db *sql.DB, start, end string) ([]models.TimeEntry, error) {
+	rows, err := db.Query(entryQuery(`te.start_time < ? AND (te.end_time IS NULL OR te.end_time > ?)`), end, start)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +72,7 @@ func ListEntriesInRange(db *sql.DB, start, end string) ([]models.TimeEntry, erro
 
 // GetEntry fetches a single entry by id.
 func GetEntry(db *sql.DB, id int64) (models.TimeEntry, error) {
-	row := db.QueryRow(entryQuery(`te.id = ?`, id), id)
+	row := db.QueryRow(entryQuery(`te.id = ?`), id)
 	return scanEntry(row)
 }
 
@@ -91,10 +80,8 @@ func GetEntry(db *sql.DB, id int64) (models.TimeEntry, error) {
 func StartEntry(db *sql.DB, todoID *int64, tagID *int64, note string) (models.TimeEntry, error) {
 	// Inherit the primary tag from the todo if not provided.
 	if tagID == nil && todoID != nil {
-		var g sql.NullInt64
-		if err := db.QueryRow(`SELECT tag_id FROM todo_tags WHERE todo_id = ? ORDER BY tag_order LIMIT 1`, *todoID).Scan(&g); err == nil && g.Valid {
-			v := g.Int64
-			tagID = &v
+		if primary, err := primaryTagID(db, *todoID); err == nil {
+			tagID = primary
 		}
 	}
 	now := tutil.Now()
@@ -142,7 +129,7 @@ func StopEntry(db *sql.DB) (models.TimeEntry, error) {
 
 // ActiveEntry returns the currently running entry, or nil if none.
 func ActiveEntry(db *sql.DB) (*models.TimeEntry, error) {
-	row := db.QueryRow(entryQuery(`te.end_time IS NULL`, ""))
+	row := db.QueryRow(entryQuery(`te.end_time IS NULL`))
 	e, err := scanEntry(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -162,10 +149,8 @@ func CreateEntry(db *sql.DB, e models.TimeEntry) (models.TimeEntry, error) {
 		return models.TimeEntry{}, fmt.Errorf("结束时间必须晚于开始时间")
 	}
 	if e.TagID == nil && e.TodoID != nil {
-		var g sql.NullInt64
-		if err := db.QueryRow(`SELECT tag_id FROM todo_tags WHERE todo_id = ? ORDER BY tag_order LIMIT 1`, *e.TodoID).Scan(&g); err == nil && g.Valid {
-			v := g.Int64
-			e.TagID = &v
+		if primary, err := primaryTagID(db, *e.TodoID); err == nil {
+			e.TagID = primary
 		}
 	}
 	res, err := db.Exec(`INSERT INTO time_entries (todo_id, tag_id, start_time, end_time, note)
@@ -186,10 +171,8 @@ func UpdateEntry(db *sql.DB, id int64, e models.TimeEntry) (models.TimeEntry, er
 		return models.TimeEntry{}, fmt.Errorf("结束时间必须晚于开始时间")
 	}
 	if e.TagID == nil && e.TodoID != nil {
-		var g sql.NullInt64
-		if err := db.QueryRow(`SELECT tag_id FROM todo_tags WHERE todo_id = ? ORDER BY tag_order LIMIT 1`, *e.TodoID).Scan(&g); err == nil && g.Valid {
-			v := g.Int64
-			e.TagID = &v
+		if primary, err := primaryTagID(db, *e.TodoID); err == nil {
+			e.TagID = primary
 		}
 	}
 	if _, err := db.Exec(`UPDATE time_entries SET todo_id = ?, tag_id = ?, start_time = ?, end_time = ?, note = ? WHERE id = ?`,
@@ -212,7 +195,7 @@ func ListEntriesForTodos(db *sql.DB, todoIDs []int64) ([]models.TimeEntry, error
 		return nil, nil
 	}
 	placeholders, args := buildPlaceholders(todoIDs)
-	rows, err := db.Query(entryQuery(`te.todo_id IN (`+placeholders+`)`, args...),
+	rows, err := db.Query(entryQuery(`te.todo_id IN (`+placeholders+`)`),
 		args...)
 	if err != nil {
 		return nil, err
@@ -238,7 +221,7 @@ func ListEntriesForTodosInRange(db *sql.DB, todoIDs []int64, start, end string) 
 	placeholders, todoArgs := buildPlaceholders(todoIDs)
 	where := fmt.Sprintf(`te.todo_id IN (%s) AND te.start_time < ? AND (te.end_time IS NULL OR te.end_time > ?)`, placeholders)
 	args := append(todoArgs, end, start)
-	rows, err := db.Query(entryQuery(where, args...), args...)
+	rows, err := db.Query(entryQuery(where), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -252,6 +235,18 @@ func ListEntriesForTodosInRange(db *sql.DB, todoIDs []int64, start, end string) 
 		es = append(es, e)
 	}
 	return es, rows.Err()
+}
+
+func primaryTagID(db *sql.DB, todoID int64) (*int64, error) {
+	var tagID sql.NullInt64
+	if err := db.QueryRow(`SELECT tag_id FROM todo_tags WHERE todo_id = ? ORDER BY tag_order LIMIT 1`, todoID).Scan(&tagID); err != nil {
+		return nil, err
+	}
+	if !tagID.Valid {
+		return nil, nil
+	}
+	v := tagID.Int64
+	return &v, nil
 }
 
 func buildPlaceholders(ids []int64) (string, []any) {
