@@ -108,42 +108,9 @@ func WithChildren(db *sql.DB, ts []models.Todo) ([]models.Todo, error) {
 		if err != nil {
 			return nil, err
 		}
-		applyInheritedTags(children, ts[i].Tags)
 		ts[i].Children = children
 	}
 	return ts, nil
-}
-
-// applyInheritedTags exposes the parent's tags on every child, including
-// subtasks created before tag inheritance was introduced. Child-specific tags
-// remain intact and are appended after inherited tags.
-func applyInheritedTags(todos []models.Todo, inherited []models.Tag) {
-	for i := range todos {
-		seen := map[int64]bool{}
-		tags := make([]models.Tag, 0, len(inherited)+len(todos[i].Tags))
-		for _, tag := range inherited {
-			if !seen[tag.ID] {
-				seen[tag.ID] = true
-				tags = append(tags, tag)
-			}
-		}
-		for _, tag := range todos[i].Tags {
-			if !seen[tag.ID] {
-				seen[tag.ID] = true
-				tags = append(tags, tag)
-			}
-		}
-		todos[i].InheritedTagIDs = make([]int64, 0, len(inherited))
-		todos[i].TagIDs = make([]int64, 0, len(tags))
-		for _, tag := range inherited {
-			todos[i].InheritedTagIDs = append(todos[i].InheritedTagIDs, tag.ID)
-		}
-		for _, tag := range tags {
-			todos[i].TagIDs = append(todos[i].TagIDs, tag.ID)
-		}
-		todos[i].Tags = tags
-		applyInheritedTags(todos[i].Children, tags)
-	}
 }
 
 // GetTodo fetches a single todo by id.
@@ -188,8 +155,9 @@ func mergeTagIDs(base, extra []int64) []int64 {
 	return out
 }
 
-// inheritParentTags ensures a subtask always keeps its parent's effective tags.
-func inheritParentTags(db *sql.DB, t *models.Todo) error {
+// copyParentTags copies the parent's current tags when a subtask is created.
+// The copied IDs are stored on the child and are independent afterwards.
+func copyParentTags(db *sql.DB, t *models.Todo) error {
 	if t.ParentID == nil {
 		return nil
 	}
@@ -197,7 +165,6 @@ func inheritParentTags(db *sql.DB, t *models.Todo) error {
 	if err != nil {
 		return fmt.Errorf("get parent tags: %w", err)
 	}
-	t.InheritedTagIDs = parent.TagIDs
 	t.TagIDs = mergeTagIDs(parent.TagIDs, t.TagIDs)
 	return nil
 }
@@ -399,7 +366,7 @@ func CreateTodo(db *sql.DB, t models.Todo) (models.Todo, error) {
 	if t.Title == "" {
 		return models.Todo{}, fmt.Errorf("title is required")
 	}
-	if err := inheritParentTags(db, &t); err != nil {
+	if err := copyParentTags(db, &t); err != nil {
 		return models.Todo{}, err
 	}
 	normalizedTags, err := normalizeStatusTags(db, t.TagIDs, "")
@@ -433,9 +400,6 @@ func CreateTodo(db *sql.DB, t models.Todo) (models.Todo, error) {
 func UpdateTodo(db *sql.DB, id int64, t models.Todo) (models.Todo, error) {
 	existing, err := GetTodo(db, id)
 	if err != nil {
-		return models.Todo{}, err
-	}
-	if err := inheritParentTags(db, &t); err != nil {
 		return models.Todo{}, err
 	}
 	if t.TagIDs == nil {

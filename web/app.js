@@ -256,30 +256,28 @@ function fillTagSelect(sel, selectedId) {
   if (prev) sel.value = prev;
 }
 
-function fillTodoSelect(sel, selectedId, groupId) {
+function fillTodoSelect(sel, selectedId, tagId) {
   const prev = sel.value;
   sel.innerHTML = '<option value="">无</option>';
 
   // Flatten the todo tree: top-level + children recursively
   const flatList = [];
-  function walk(todos, depth, parentTagId) {
+  function walk(todos, depth) {
     for (const t of todos) {
-      // For sub-tasks, use the parent's primary tag for filtering
-      const effectiveTagId = t.parent_id ? (parentTagId ?? (t.tag_ids || [])[0]) : (t.tag_ids || [])[0];
-      const tagIDs = t.tag_ids || (effectiveTagId ? [effectiveTagId] : []);
-      if (groupId != null) {
-        if (!tagIDs.includes(groupId)) continue;
+      const tagIDs = t.tag_ids || [];
+      if (tagId != null) {
+        if (!tagIDs.includes(tagId)) continue;
       }
       const indent = depth > 0 ? '  '.repeat(depth) + '└ ' : '';
       const hasKids = t.children && t.children.length;
       const label = indent + t.title + (hasKids && depth === 0 ? ' …' : '');
-      flatList.push({ id: t.id, label, tagId: effectiveTagId });
+      flatList.push({ id: t.id, label });
       if (t.children && t.children.length) {
-        walk(t.children, depth + 1, (t.tag_ids || [])[0]);
+        walk(t.children, depth + 1);
       }
     }
   }
-  walk(state.todos, 0, null);
+  walk(state.todos, 0);
 
   for (const item of flatList) {
     const opt = el('option', { value: item.id }, item.label);
@@ -350,7 +348,7 @@ async function onTimerToggle() {
       const todoId = $('#timer-todo').value;
       const note = $('#timer-note').value.trim();
       state.activeEntry = await api('POST', '/api/time-entries/start', {
-        // With a task selected, the server inherits its primary tag. The tag
+        // With a task selected, the server uses its primary tag. The tag
         // selector above is intentionally a filter rather than an assignment.
         tag_id: todoId ? null : ($('#timer-group').value ? Number($('#timer-group').value) : null),
         todo_id: todoId ? Number(todoId) : null,
@@ -1659,10 +1657,10 @@ function openEntryModal(e, defaultDate) {
   // Build tag and task selectors. The selected task's tags remain visible.
   const tagSelectControl = tagSelect(initialTagId);
   const todoWrapper = el('div', { class: 'field entry-task-field' }, el('label', {}, '关联任务（可选）'));
-  function buildTodoField(groupId) {
+  function buildTodoField(tagId) {
     todoWrapper.querySelectorAll('.entry-task-control').forEach(n => n.remove());
     const control = el('div', { class: 'entry-task-control' });
-    const select = todoSelect(initialTodoId, groupId);
+    const select = todoSelect(initialTodoId, tagId);
     const meta = el('div', { class: 'entry-task-tags' });
     const renderTaskMeta = () => {
       meta.innerHTML = '';
@@ -1832,27 +1830,26 @@ function tagSelect(selectedId) {
   }
   return s;
 }
-function todoSelect(selectedId, groupId) {
+function todoSelect(selectedId, tagId) {
   const s = el('select', { class: 'select' });
   s.appendChild(el('option', { value: '' }, '无'));
   // Flatten the todo tree so sub-tasks are selectable (indented under their
-  // parent). Sub-tasks inherit the parent's group for filtering.
+  // parent). The child already stores a copy of the parent's tags.
   const flatList = [];
-  function walk(todos, depth, parentTagId) {
+  function walk(todos, depth) {
     for (const t of todos) {
-      const effectiveTagId = t.parent_id ? (parentTagId ?? (t.tag_ids || [])[0]) : (t.tag_ids || [])[0];
-      const tagIDs = t.tag_ids || (effectiveTagId ? [effectiveTagId] : []);
-      if (groupId != null) {
-        if (!tagIDs.includes(groupId)) continue;
+      const tagIDs = t.tag_ids || [];
+      if (tagId != null) {
+        if (!tagIDs.includes(tagId)) continue;
       }
       const indent = depth > 0 ? '  '.repeat(depth) + '└ ' : '';
       flatList.push({ id: t.id, label: indent + t.title });
       if (t.children && t.children.length) {
-        walk(t.children, depth + 1, (t.tag_ids || [])[0]);
+        walk(t.children, depth + 1);
       }
     }
   }
-  walk(state.todos, 0, null);
+  walk(state.todos, 0);
   for (const item of flatList) {
     const opt = el('option', { value: item.id }, item.label);
     if (selectedId && Number(selectedId) === item.id) opt.selected = true;

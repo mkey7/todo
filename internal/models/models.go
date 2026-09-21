@@ -25,12 +25,9 @@ type Todo struct {
 	CompletedAt *string `json:"completed_at"`
 
 	// joined/display fields
-	Tags   []Tag   `json:"tags,omitempty"`
-	TagIDs []int64 `json:"tag_ids,omitempty"`
-	// InheritedTagIDs are supplied for display only; TagIDs always contains the
-	// effective tag set, including any tags inherited from a parent task.
-	InheritedTagIDs []int64 `json:"inherited_tag_ids,omitempty"`
-	Children        []Todo  `json:"children,omitempty"`
+	Tags     []Tag   `json:"tags,omitempty"`
+	TagIDs   []int64 `json:"tag_ids,omitempty"`
+	Children []Todo  `json:"children,omitempty"`
 }
 
 // TimeEntry records a span of work. EndTime == nil means in progress.

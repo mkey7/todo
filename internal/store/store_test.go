@@ -86,7 +86,7 @@ func TestTodoSubtasksAndStatus(t *testing.T) {
 	}
 }
 
-func TestSubtaskInheritsAndExtendsParentTags(t *testing.T) {
+func TestSubtaskCopiesParentTagsOnCreation(t *testing.T) {
 	d := newTestDB(t)
 	work, _ := CreateTag(d, models.Tag{Name: "工作", Color: "#6366f1"})
 	urgent, _ := CreateTag(d, models.Tag{Name: "紧急", Color: "#ef4444"})
@@ -99,7 +99,31 @@ func TestSubtaskInheritsAndExtendsParentTags(t *testing.T) {
 		t.Fatalf("create child: %v", err)
 	}
 	if len(child.TagIDs) != 2 || child.TagIDs[0] != work.ID || child.TagIDs[1] != urgent.ID {
-		t.Fatalf("child tags = %v, want inherited and additional tags", child.TagIDs)
+		t.Fatalf("child tags = %v, want copied parent and additional tags", child.TagIDs)
+	}
+
+	// Parent changes do not propagate after the child is created.
+	if _, err := UpdateTodo(d, parent.ID, models.Todo{Title: parent.Title, TagIDs: []int64{urgent.ID}}); err != nil {
+		t.Fatalf("update parent tags: %v", err)
+	}
+	child, err = GetTodo(d, child.ID)
+	if err != nil {
+		t.Fatalf("reload child: %v", err)
+	}
+	if len(child.TagIDs) != 2 || child.TagIDs[0] != work.ID || child.TagIDs[1] != urgent.ID {
+		t.Fatalf("child tags changed with parent: %v", child.TagIDs)
+	}
+
+	// Child changes do not modify the parent.
+	if _, err := UpdateTodo(d, child.ID, models.Todo{Title: child.Title, ParentID: child.ParentID, TagIDs: []int64{urgent.ID}}); err != nil {
+		t.Fatalf("update child tags: %v", err)
+	}
+	parent, err = GetTodo(d, parent.ID)
+	if err != nil {
+		t.Fatalf("reload parent: %v", err)
+	}
+	if len(parent.TagIDs) != 1 || parent.TagIDs[0] != urgent.ID {
+		t.Fatalf("parent tags changed with child: %v", parent.TagIDs)
 	}
 }
 
@@ -229,7 +253,7 @@ func TestTimeEntryStartStop(t *testing.T) {
 	g, _ := CreateTag(d, models.Tag{Name: "开发", Color: "#6366f1"})
 	todo, _ := CreateTodo(d, models.Todo{Title: "任务", TagIDs: []int64{g.ID}})
 
-	// start with a todo -> tag inherited
+	// start with a todo -> primary tag selected automatically
 	e, err := StartEntry(d, &todo.ID, nil, "")
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -238,7 +262,7 @@ func TestTimeEntryStartStop(t *testing.T) {
 		t.Errorf("new entry should be open")
 	}
 	if e.TagID == nil || *e.TagID != g.ID {
-		t.Errorf("tag not inherited: %+v", e.TagID)
+		t.Errorf("primary tag not selected: %+v", e.TagID)
 	}
 
 	// active entry exists
