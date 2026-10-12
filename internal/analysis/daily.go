@@ -86,9 +86,8 @@ func buildTodoBreakdown(entries []models.TimeEntry, total float64) []TodoStat {
 			if name == "" {
 				name = "未命名任务"
 			}
-			// Stable, readable colors for task slices without adding a new column.
-			colors := []string{"#6366f1", "#22c55e", "#f59e0b", "#ec4899", "#06b6d4", "#8b5cf6"}
-			color = colors[int(id)%len(colors)]
+			// The task's own color, shared with the timelines and task cards.
+			color = tutil.TodoColor(id)
 		}
 		if st, ok := byID[id]; ok {
 			st.Seconds += entrySeconds(e)

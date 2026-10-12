@@ -12,9 +12,9 @@ func scanEntry(scanner interface{ Scan(...any) error }) (models.TimeEntry, error
 	var e models.TimeEntry
 	var todoID, tagID sql.NullInt64
 	var endTime, note, createdAt sql.NullString
-	var tagName, tagColor, todoTitle, todoPrimaryColor sql.NullString
+	var tagName, tagColor, todoTitle sql.NullString
 	err := scanner.Scan(&e.ID, &todoID, &tagID, &e.StartTime, &endTime,
-		&note, &createdAt, &tagName, &tagColor, &todoTitle, &todoPrimaryColor)
+		&note, &createdAt, &tagName, &tagColor, &todoTitle)
 	if err != nil {
 		return e, err
 	}
@@ -26,19 +26,17 @@ func scanEntry(scanner interface{ Scan(...any) error }) (models.TimeEntry, error
 	e.TagName = tagName.String
 	e.TagColor = tagColor.String
 	e.TodoTitle = todoTitle.String
-	e.TodoPrimaryColor = todoPrimaryColor.String
 	return e, nil
 }
 
 // entryColumns includes joined tag/todo display fields.
 const entryColumns = `te.id, te.todo_id, te.tag_id, te.start_time, te.end_time, te.note, te.created_at,
-	g.name AS tag_name, g.color AS tag_color, t.title AS todo_title, primary_tag.color AS todo_primary_color`
+	g.name AS tag_name, g.color AS tag_color, t.title AS todo_title`
 
 func entryQuery(where string) string {
 	return fmt.Sprintf(`SELECT %s FROM time_entries te
 		LEFT JOIN tags g ON g.id = te.tag_id
 		LEFT JOIN todos t ON t.id = te.todo_id
-		LEFT JOIN tags primary_tag ON primary_tag.id = (SELECT tag_id FROM todo_tags WHERE todo_id = t.id ORDER BY tag_order LIMIT 1)
 		WHERE %s ORDER BY te.start_time ASC`, entryColumns, where)
 }
 

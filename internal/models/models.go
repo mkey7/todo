@@ -44,10 +44,8 @@ type TimeEntry struct {
 	TagName   string `json:"tag_name,omitempty"`
 	TagColor  string `json:"tag_color,omitempty"`
 	TodoTitle string `json:"todo_title,omitempty"`
-	// TodoPrimaryColor is the color of the todo's first tag, used by timelines.
-	TodoPrimaryColor string  `json:"todo_primary_color,omitempty"`
-	Tags             []Tag   `json:"tags,omitempty"`
-	TagIDs           []int64 `json:"tag_ids,omitempty"`
+	Tags      []Tag   `json:"tags,omitempty"`
+	TagIDs    []int64 `json:"tag_ids,omitempty"`
 }
 
 // DailySummary holds a user's free-text reflection for a given day.

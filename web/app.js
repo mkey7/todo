@@ -30,7 +30,7 @@ const todayStr = () => {
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
 };
-const emptyHint = (msg) => el('div', { class: 'tl-empty' }, msg);
+const emptyHint = (msg) => el('div', { class: 'empty-state' }, msg);
 
 async function api(method, path, body) {
   const opts = { method, headers: {} };
@@ -75,8 +75,22 @@ function tagName(id) {
   const tag = state.tags.find(x => x.id === id);
   return tag ? tag.name : '未标记';
 }
+// A task's own color, derived from its id. Mirrors tutil.TodoColor on the
+// server so a task keeps one color in timelines, cards and analysis charts.
+const TODO_COLORS = [
+  '#4f46e5', '#7c3aed', '#a21caf', '#db2777',
+  '#e11d48', '#dc2626', '#ea580c', '#d97706',
+  '#65a30d', '#16a34a', '#059669', '#0d9488',
+  '#0891b2', '#0284c7', '#2563eb', '#6366f1',
+];
+function todoColor(id) {
+  const n = Number(id);
+  if (!n || n < 0) return '#9ca3af';
+  return TODO_COLORS[n % TODO_COLORS.length];
+}
+// Entries take the task's color; unlinked time falls back to the tag color.
 function entryColor(entry) {
-  return entry.todo_primary_color || tagColor(entry.tag_id);
+  return entry.todo_id ? todoColor(entry.todo_id) : tagColor(entry.tag_id);
 }
 function tagIDByName(name) {
   const tag = state.tags.find(t => t.name === name);
@@ -537,7 +551,7 @@ function renderTodos() {
   const all = el('li', {
     class: 'group-item' + (state.currentTag === '' ? ' active' : ''),
     onclick: () => { state.currentTag = ''; state.todoTagIDs = []; state.todoExcludedTagIDs = []; renderTodos(); },
-  }, el('span', { class: 'dot', style: 'background:#9ca3af' }), '全部');
+  }, el('span', { class: 'dot', style: 'background:var(--faint)' }), '全部');
   ul.appendChild(all);
   for (const g of state.tags) {
     const li = el('li', {
@@ -699,7 +713,9 @@ function buildTodoRow(t, compact) {
     ev.stopPropagation();
     toggleInlineAnalysis(t, item);
   });
-  main.appendChild(titleEl);
+  // The task's own color, matching its timeline blocks.
+  main.appendChild(el('div', { class: 'todo-title-row' },
+    el('i', { class: 'todo-color-dot', style: `background:${todoColor(t.id)}` }), titleEl));
   if (state.view !== 'today' && state.activeEntry && String(state.activeEntry.todo_id) === String(t.id)) {
     main.appendChild(el('span', { class: 'task-elapsed', 'data-task-elapsed': t.id }, '计时中 ' + formatElapsedSeconds(activeElapsedSeconds())));
   }
@@ -790,7 +806,7 @@ async function renderInlineAnalysis(t, container) {
     ));
 
     // Stats grid
-    const grid = el('div', { class: 'stat-grid', style: 'margin-bottom:16px' });
+    const grid = el('div', { class: 'stat-grid mb-4' });
     grid.appendChild(statCard('累计总工时', totalDur, allEntries.length + ' 条记录'));
     grid.appendChild(statCard('本月工时', fmtDurationSecs(monthSecs), monthEntries.length + ' 条记录'));
     grid.appendChild(statCard('子任务数', String(descCount), todoStatusLabel(t)));
@@ -816,7 +832,7 @@ async function renderInlineAnalysis(t, container) {
       container.appendChild(emptyHint('该任务暂没有时间记录'));
       return;
     }
-    container.appendChild(el('h4', { style: 'margin-top:16px' }, '时间记录列表'));
+    container.appendChild(el('h4', { class: 'mt-4' }, '时间记录列表'));
     for (const e of monthEntries) {
       container.appendChild(buildEntryRow(e, () => renderInlineAnalysis(t, container)));
     }
@@ -837,7 +853,7 @@ function buildHeatmapNav() {
 
   return el('div', { class: 'heatmap-nav' },
     el('button', { class: 'btn btn-small', onclick: () => { inlineAnalysisState.month = prevStr; renderInlineAnalysis(inlineAnalysisState.todo, inlineAnalysisState.container); } }, '◀'),
-    el('span', { style: 'font-weight:600;margin:0 8px' }, label),
+    el('span', { class: 'heatmap-month' }, label),
     el('button', { class: 'btn btn-small', onclick: () => { inlineAnalysisState.month = nextStr; renderInlineAnalysis(inlineAnalysisState.todo, inlineAnalysisState.container); } }, '▶'),
   );
 }
@@ -951,7 +967,7 @@ function buildTimelineTrack(entries, showNow, viewDate, zoom) {
   const rangeStartMs = dayStart + rangeStart * 3600 * 1000;
   const rangeEndMs = dayStart + rangeEnd * 3600 * 1000;
   if (!entries || entries.length === 0) {
-    host.appendChild(el('div', { class: 'tl-empty', style: 'width:100%' }, '暂无记录'));
+    host.appendChild(el('div', { class: 'empty-state' }, '暂无记录'));
   }
   for (const e of entries || []) {
     const start = new Date(e.start_time.replace(' ', 'T')).getTime();
@@ -1145,8 +1161,8 @@ async function renderAnalysis() {
         api('GET', '/api/time-entries?date=' + state.analysisDate),
       ]);
       // 给每日分析加上当日时间轴
-      const tlCard = el('div', { class: 'card', style: 'margin-bottom:16px' });
-      const tlHead = el('div', { class: 'panel-head', style: 'justify-content:space-between' },
+      const tlCard = el('div', { class: 'card mb-4' });
+      const tlHead = el('div', { class: 'panel-head' },
         el('h3', {}, state.analysisDate + ' 时间轴'),
         el('div', { class: 'seg' },
           el('button', { class: 'seg-btn' + (state.timelineZoom === '24h' ? ' active' : ''), onclick: () => { state.timelineZoom = '24h'; renderAnalysis(); } }, '全天'),
@@ -1187,7 +1203,7 @@ function renderDailyAnalysis(r) {
   // Stats + Pie chart side-by-side
   const flexRow = el('div', { class: 'analysis-flex-row' });
 
-  const leftGrid = el('div', { class: 'stat-grid', style: 'flex:1' });
+  const leftGrid = el('div', { class: 'stat-grid' });
   leftGrid.appendChild(statCard('总工时', r.total_duration, r.entry_count + ' 条记录'));
   leftGrid.appendChild(statCard('完成任务', String(r.completed_todos), r.active_todo_count + ' 个进行中'));
   if (r.longest_focus) leftGrid.appendChild(statCard('最长专注', r.longest_focus.duration, r.longest_focus.entry_count + ' 条连续'));
@@ -1198,10 +1214,10 @@ function renderDailyAnalysis(r) {
   }
   flexRow.appendChild(leftGrid);
 
-  flexRow.appendChild(el('div', { class: 'card', style: 'flex:1; margin-left:16px' },
+  flexRow.appendChild(el('div', { class: 'card' },
     el('h3', {}, '任务占比'),
     buildPieChart(r.todo_breakdown)));
-  flexRow.appendChild(el('div', { class: 'card', style: 'flex:1; margin-left:16px' },
+  flexRow.appendChild(el('div', { class: 'card' },
     el('h3', {}, '标签占比'),
     buildPieChart(r.tag_breakdown)));
 
@@ -1228,15 +1244,15 @@ function renderWeeklyAnalysis(r) {
 
   // Keep the hourly timeline immediately after the per-day bar chart so the
   // aggregate and the underlying time distribution can be read together.
-  wrap.appendChild(el('div', { class: 'card', style: 'margin-top:16px' },
+  wrap.appendChild(el('div', { class: 'card mt-4' },
     el('h3', {}, '每日趋势'),
     buildTrendChart(r.daily_trend)));
 
   // 7-day timeline: one column per weekday, with hourly grid lines.
-  const tlCard = el('div', { class: 'card', style: 'margin-top:16px' });
-  tlCard.appendChild(el('div', { class: 'panel-head', style: 'justify-content:space-between' },
+  const tlCard = el('div', { class: 'card mt-4' });
+  tlCard.appendChild(el('div', { class: 'panel-head' },
     el('h3', {}, '本周时间轴 · 7天'),
-    el('div', { style: 'display:flex;gap:8px' },
+    el('div', { class: 'row' },
       el('div', { class: 'seg' },
         el('button', { class: 'seg-btn' + (state.timelineZoom === '24h' ? ' active' : ''), onclick: () => { state.timelineZoom = '24h'; renderAnalysis(); } }, '全天'),
         el('button', { class: 'seg-btn' + (state.timelineZoom === '12h' ? ' active' : ''), onclick: () => { state.timelineZoom = '12h'; renderAnalysis(); } }, '工作时段'),
@@ -1249,10 +1265,10 @@ function renderWeeklyAnalysis(r) {
   tlCard.appendChild(buildWeekTimeline(r.daily_trend, r.weekly_entries, state.timelineZoom));
   wrap.appendChild(tlCard);
 
-  const breakdowns = el('div', { class: 'analysis-flex-row', style: 'margin-top:16px' });
-  breakdowns.appendChild(el('div', { class: 'card', style: 'flex:1' },
+  const breakdowns = el('div', { class: 'analysis-flex-row mt-4' });
+  breakdowns.appendChild(el('div', { class: 'card' },
     el('h3', {}, '任务占比'), buildPieChart(r.todo_breakdown)));
-  breakdowns.appendChild(el('div', { class: 'card', style: 'flex:1; margin-left:16px' },
+  breakdowns.appendChild(el('div', { class: 'card' },
     el('h3', {}, '标签占比'), buildPieChart(r.tag_breakdown)));
   wrap.appendChild(breakdowns);
   // Keep the editable reflection as the final section of weekly analysis.
@@ -1266,7 +1282,7 @@ function barsFromTags(tags) {
 function barsFromParts(parts) {
   const wrap = el('div', {});
   for (const p of parts) {
-    wrap.appendChild(buildBar(p.part, p.percent, p.duration, '#6366f1'));
+    wrap.appendChild(buildBar(p.part, p.percent, p.duration, 'var(--primary)'));
   }
   return wrap;
 }
@@ -1398,7 +1414,7 @@ function buildBar(name, percent, duration, color) {
   const pct = percent || 0;
   return el('div', { class: 'bar-row' },
     el('div', { class: 'name' }, name),
-    el('div', { class: 'bar-track' }, el('div', { class: 'bar-fill', style: `width:${Math.min(100, pct)}%; background:${color || '#6366f1'}` })),
+    el('div', { class: 'bar-track' }, el('div', { class: 'bar-fill', style: `width:${Math.min(100, pct)}%; background:${color || 'var(--primary)'}` })),
     el('div', { class: 'pct' }, duration + ' · ' + pct.toFixed(0) + '%'));
 }
 function buildHourBars(bins) {
@@ -1407,7 +1423,7 @@ function buildHourBars(bins) {
   for (const b of bins) {
     if (b.seconds < 1) continue;
     const dur = Math.round(b.seconds / 60) + 'm';
-    wrap.appendChild(buildBar(String(b.hour).padStart(2, '0') + ':00', (b.seconds / max) * 100, dur, '#818cf8'));
+    wrap.appendChild(buildBar(String(b.hour).padStart(2, '0') + ':00', (b.seconds / max) * 100, dur, 'var(--primary)'));
   }
   return wrap;
 }
@@ -1546,7 +1562,7 @@ function setWeekZoom(px) {
 }
 
 function buildDailySummaryEditor(date, content) {
-  const card = el('div', { class: 'card improvement-box', style: 'margin-top:16px' });
+  const card = el('div', { class: 'card improvement-box mt-4' });
   card.appendChild(el('h3', {}, '当日总结'));
   card.appendChild(el('label', {}, '总结内容'));
   const input = el('textarea', { id: 'daily-summary', placeholder: '写下当日总结…' }); input.value = content || '';
@@ -1563,7 +1579,7 @@ function buildDailySummaryEditor(date, content) {
 }
 
 function buildWeeklySummaryEditor(week, content) {
-  const card = el('div', { class: 'card improvement-box', style: 'margin:16px 0' });
+  const card = el('div', { class: 'card improvement-box my-4' });
   card.appendChild(el('h3', {}, '本周总结'));
   card.appendChild(el('label', {}, '记录本周成果、问题与下周计划'));
   const input = el('textarea', { id: 'weekly-summary', placeholder: '写下本周总结…' }); input.value = content || '';
@@ -1646,7 +1662,6 @@ function openEntryModal(e, defaultDate) {
   const endDate = e && e.end_time ? e.end_time.slice(0, 10) : startDate;
   const startTime = e ? e.start_time.slice(11, 16) : '09:00';
   const endTime = e && e.end_time ? e.end_time.slice(11, 16) : '';
-  const initialTagId = e && e.tag_id ? e.tag_id : Number(state.currentTag) || null;
   const initialTodoId = e && e.todo_id ? e.todo_id : null;
 
   const startDateField = field('开始日期', input('date', startDate));
@@ -1654,33 +1669,61 @@ function openEntryModal(e, defaultDate) {
   const endDateField = field('结束日期', input('date', endDate));
   const endTimeField = field('结束时间', input('time', endTime));
 
-  // Build tag and task selectors. The selected task's tags remain visible.
-  const tagSelectControl = tagSelect(initialTagId);
-  const todoWrapper = el('div', { class: 'field entry-task-field' }, el('label', {}, '关联任务（可选）'));
-  function buildTodoField(tagId) {
-    todoWrapper.querySelectorAll('.entry-task-control').forEach(n => n.remove());
-    const control = el('div', { class: 'entry-task-control' });
-    const select = todoSelect(initialTodoId, tagId);
-    const meta = el('div', { class: 'entry-task-tags' });
-    const renderTaskMeta = () => {
-      meta.innerHTML = '';
-      const todo = findTodoById(select.value ? Number(select.value) : null);
-      if (!todo) { meta.appendChild(el('span', { class: 'entry-task-empty' }, '选择任务后显示其标签')); return; }
-      for (const tag of (todo.tags || [])) {
-        meta.appendChild(el('span', { class: 'group-tag' }, el('i', { style: `background:${tag.color}` }), tag.name));
-      }
-      meta.appendChild(el('button', { type: 'button', class: 'btn btn-small', onclick: () => openTodoModal(todo) }, '编辑任务'));
-    };
-    select.addEventListener('change', renderTaskMeta);
-    control.append(select, meta);
-    todoWrapper.appendChild(control);
+  // The task is the main control here; tags only narrow the task dropdown.
+  let filterTagIDs = [];
+  const taskSelect = todoSelect(initialTodoId, filterTagIDs);
+  const taskMeta = el('div', { class: 'entry-task-tags' });
+  const renderTaskMeta = () => {
+    taskMeta.innerHTML = '';
+    const todo = findTodoById(taskSelect.value ? Number(taskSelect.value) : null);
+    if (!todo) { taskMeta.appendChild(el('span', { class: 'entry-task-empty' }, '选择任务后显示其标签')); return; }
+    for (const tag of (todo.tags || [])) {
+      taskMeta.appendChild(el('span', { class: 'group-tag' }, el('i', { style: `background:${tag.color}` }), tag.name));
+    }
+    taskMeta.appendChild(el('button', { type: 'button', class: 'btn btn-small', onclick: () => openTodoModal(todo) }, '编辑任务'));
+  };
+  taskSelect.addEventListener('change', renderTaskMeta);
+
+  const filterTags = el('div', { class: 'todo-tag-options', 'aria-label': '按标签筛选任务' });
+  const renderTagFilter = () => {
+    filterTags.innerHTML = '';
+    for (const tag of state.tags) {
+      const active = filterTagIDs.includes(tag.id);
+      filterTags.appendChild(el('button', {
+        type: 'button',
+        class: 'todo-tag-option' + (active ? ' active' : ''),
+        title: tag.description || '',
+        onclick: () => {
+          filterTagIDs = active ? filterTagIDs.filter(id => id !== tag.id) : [...filterTagIDs, tag.id];
+          rebuildTaskOptions();
+        },
+      }, el('i', { style: `background:${tag.color}` }), tag.name));
+    }
+    if (filterTagIDs.length) {
+      filterTags.appendChild(el('button', {
+        type: 'button', class: 'btn btn-small',
+        onclick: () => { filterTagIDs = []; rebuildTaskOptions(); },
+      }, '清除'));
+    }
+  };
+  // Rebuilding keeps the selected task in the list, so narrowing the filter
+  // never silently drops the record's task.
+  const rebuildTaskOptions = () => {
+    const current = taskSelect.value;
+    const rebuilt = todoSelect(current ? Number(current) : null, filterTagIDs);
+    taskSelect.innerHTML = rebuilt.innerHTML;
+    taskSelect.value = current;
+    renderTagFilter();
     renderTaskMeta();
-  }
-  buildTodoField(initialTagId);
-  tagSelectControl.addEventListener('change', function () {
-    const gid = this.value ? Number(this.value) : null;
-    buildTodoField(gid);
-  });
+  };
+  renderTagFilter();
+
+  const todoWrapper = el('div', { class: 'field entry-task-field' },
+    el('label', {}, '关联任务（可选）'),
+    el('div', { class: 'entry-task-filter' },
+      el('div', { class: 'entry-task-filter-label' }, '按标签筛选任务'), filterTags),
+    taskSelect, taskMeta);
+  renderTaskMeta();
 
   const noteInput = textarea(e && e.note ? e.note : '');
   noteInput.rows = 3;
@@ -1691,7 +1734,7 @@ function openEntryModal(e, defaultDate) {
     el('div', { class: 'row' }, startDateField, startTimeField),
     el('div', { class: 'row' }, endDateField, endTimeField)));
   form.appendChild(el('div', { class: 'entry-editor-section' }, el('div', { class: 'entry-editor-section-title' }, '任务与标签'),
-    el('div', { class: 'field' }, el('label', {}, '记录标签'), tagSelectControl), todoWrapper));
+    todoWrapper));
   form.appendChild(noteField);
   const actions = el('div', { class: 'save-row' });
   if (!isNew) {
@@ -1714,12 +1757,14 @@ function openEntryModal(e, defaultDate) {
       const endDt = en ? `${ed} ${en}:00` : null;
       if (!st) { alert('请填写开始时间'); return; }
       if (endDt && endDt <= startDt) { alert('结束时间必须晚于开始时间'); return; }
+      const todoId = taskSelect.value ? Number(taskSelect.value) : null;
       const body = {
         start_time: startDt,
         end_time: endDt,
         note: noteField.querySelector('textarea').value,
-        tag_id: tagSelectControl.value ? Number(tagSelectControl.value) : null,
-        todo_id: todoWrapper.querySelector('select').value ? Number(todoWrapper.querySelector('select').value) : null,
+        // A record inherits the task's primary tag; without a task it is untagged.
+        tag_id: null,
+        todo_id: todoId,
       };
       try {
         if (isNew) await api('POST', '/api/time-entries', body);
@@ -1816,34 +1861,28 @@ function input(type, value) {
   return i;
 }
 function textarea(value) {
-  const t = el('textarea', { class: 'input', style: 'min-height:60px' });
+  const t = el('textarea', { class: 'input' });
   if (value) t.value = value;
   return t;
 }
-function tagSelect(selectedId) {
-  const s = el('select', { class: 'select' });
-  s.appendChild(el('option', { value: '' }, '未分组'));
-  for (const g of state.tags) {
-    const opt = el('option', { value: g.id }, g.name);
-    if (selectedId && Number(selectedId) === g.id) opt.selected = true;
-    s.appendChild(opt);
-  }
-  return s;
-}
-function todoSelect(selectedId, tagId) {
+function todoSelect(selectedId, tagIDs) {
   const s = el('select', { class: 'select' });
   s.appendChild(el('option', { value: '' }, '无'));
   // Flatten the todo tree so sub-tasks are selectable (indented under their
   // parent). The child already stores a copy of the parent's tags.
+  const filter = (tagIDs || []).map(Number);
   const flatList = [];
   function walk(todos, depth) {
     for (const t of todos) {
-      const tagIDs = t.tag_ids || [];
-      if (tagId != null) {
-        if (!tagIDs.includes(tagId)) continue;
+      const selected = selectedId && Number(selectedId) === t.id;
+      // An OR match on any filtered tag; the selected task always stays listed.
+      const matches = filter.length === 0 || (t.tag_ids || []).some(id => filter.includes(id));
+      if (matches || selected) {
+        const indent = depth > 0 ? '  '.repeat(depth) + '└ ' : '';
+        flatList.push({ id: t.id, label: indent + t.title });
       }
-      const indent = depth > 0 ? '  '.repeat(depth) + '└ ' : '';
-      flatList.push({ id: t.id, label: indent + t.title });
+      // Always descend: a matching sub-task under a non-matching parent must
+      // still be selectable.
       if (t.children && t.children.length) {
         walk(t.children, depth + 1);
       }

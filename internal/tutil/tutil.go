@@ -137,6 +137,25 @@ func FormatDuration(seconds float64) string {
 	return fmt.Sprintf("%ds", s)
 }
 
+// todoPalette holds distinct, readable tones (Tailwind 600-level) that stay
+// legible under the white text used by timeline blocks and pie slices.
+var todoPalette = []string{
+	"#4f46e5", "#7c3aed", "#a21caf", "#db2777",
+	"#e11d48", "#dc2626", "#ea580c", "#d97706",
+	"#65a30d", "#16a34a", "#059669", "#0d9488",
+	"#0891b2", "#0284c7", "#2563eb", "#6366f1",
+}
+
+// TodoColor returns a stable color for a task, picked from todoPalette by its
+// id. The frontend mirrors this in todoColor() (web/app.js) so a task keeps one
+// color across timelines, task cards and analysis charts.
+func TodoColor(id int64) string {
+	if id <= 0 {
+		return "#9ca3af"
+	}
+	return todoPalette[int(id)%len(todoPalette)]
+}
+
 // PartOfDay classifies an hour into a named time band.
 func PartOfDay(hour int) string {
 	switch {
