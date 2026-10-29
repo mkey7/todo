@@ -573,6 +573,8 @@ textarea.input { resize: vertical; min-height: 60px; line-height: 1.55; }
 .bf-note-row { display: flex; gap: var(--sp-2); }
 .bf-note-row .input { flex: 1; min-width: 0; }
 .bf-note-row .btn { flex-shrink: 0; }
+.bf-preview { font-size: var(--fs-sm); color: var(--muted); font-variant-numeric: tabular-nums; }
+.bf-preview.invalid { color: var(--danger); }
 
 /* --------------------------------------------------------------------------
    12. 任务
@@ -725,6 +727,19 @@ textarea.input { resize: vertical; min-height: 60px; line-height: 1.55; }
   border-radius: var(--r-sm);
   overflow: hidden;
   border: 1px solid var(--border);
+  touch-action: pan-y;      /* 横向拖动圈选补录，纵向仍归页面滚动 */
+  user-select: none;
+  -webkit-user-select: none;
+}
+.tl-select {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: rgba(79, 70, 229, .22);
+  border: 1px dashed var(--primary);
+  border-radius: 3px;
+  pointer-events: none;
+  z-index: 4;
 }
 .tl-block {
   position: absolute;

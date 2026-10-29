@@ -192,6 +192,93 @@ func TestAPIStartStopTimer(t *testing.T) {
 // ensure the embedded DB import is referenced for the test binary.
 var _ = sql.ErrNoRows
 
+func TestAPITimeEntryOverlapConflict(t *testing.T) {
+	s := newTestServer(t)
+	defer s.Close()
+
+	resp := do(t, "POST", s.URL+"/api/time-entries", map[string]any{
+		"start_time": "2026-07-14 09:00:00", "end_time": "2026-07-14 10:00:00",
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("first entry status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	overlapping := map[string]any{"start_time": "2026-07-14 09:30:00", "end_time": "2026-07-14 10:30:00"}
+	resp = do(t, "POST", s.URL+"/api/time-entries", overlapping)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("overlapping entry status = %d, want 409", resp.StatusCode)
+	}
+	var conflict struct {
+		Error     string           `json:"error"`
+		Conflicts []map[string]any `json:"conflicts"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&conflict); err != nil {
+		t.Fatalf("decode conflict: %v", err)
+	}
+	resp.Body.Close()
+	if len(conflict.Conflicts) != 1 || conflict.Error == "" {
+		t.Fatalf("conflict payload = %+v", conflict)
+	}
+
+	overlapping["allow_overlap"] = true
+	resp = do(t, "POST", s.URL+"/api/time-entries", overlapping)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("allow_overlap entry status = %d, want 201", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPITimeEntryValidation(t *testing.T) {
+	s := newTestServer(t)
+	defer s.Close()
+
+	// A malformed timestamp is rejected rather than silently stored.
+	resp := do(t, "POST", s.URL+"/api/time-entries", map[string]any{"start_time": "2026-7-4 9:00"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad time status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Unknown fields stay rejected (decodeJSON uses DisallowUnknownFields).
+	resp = do(t, "POST", s.URL+"/api/time-entries", map[string]any{
+		"start_time": "2026-07-14 09:00:00", "end_time": "2026-07-14 10:00:00", "bogus": 1,
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown field status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Updating a missing entry is a 404, not a 400.
+	resp = do(t, "PUT", s.URL+"/api/time-entries/4242", map[string]any{
+		"start_time": "2026-07-14 09:00:00", "end_time": "2026-07-14 10:00:00",
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing entry status = %d, want 404", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPISecondActiveEntryRejected(t *testing.T) {
+	s := newTestServer(t)
+	defer s.Close()
+
+	resp := do(t, "POST", s.URL+"/api/time-entries", map[string]any{"start_time": "2026-07-14 09:00:00"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("in-progress entry status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// allow_overlap does not make a second running entry legal.
+	resp = do(t, "POST", s.URL+"/api/time-entries", map[string]any{
+		"start_time": "2026-07-14 10:00:00", "allow_overlap": true,
+	})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("second in-progress status = %d, want 409", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
