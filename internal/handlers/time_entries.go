@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -73,16 +75,55 @@ func (h *Handler) StopTimeEntry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, e)
 }
 
+// timeEntryReq is the body accepted by the manual entry endpoints. It is a
+// dedicated struct (rather than models.TimeEntry) because decodeJSON rejects
+// unknown fields, and because the write-only allow_overlap flag belongs to the
+// request rather than the record.
+type timeEntryReq struct {
+	TodoID       *int64  `json:"todo_id"`
+	TagID        *int64  `json:"tag_id"`
+	StartTime    string  `json:"start_time"`
+	EndTime      *string `json:"end_time"`
+	Note         string  `json:"note"`
+	AllowOverlap bool    `json:"allow_overlap"`
+}
+
+func (b timeEntryReq) entry() models.TimeEntry {
+	return models.TimeEntry{
+		TodoID:    b.TodoID,
+		TagID:     b.TagID,
+		StartTime: b.StartTime,
+		EndTime:   b.EndTime,
+		Note:      b.Note,
+	}
+}
+
+// writeEntryErr maps a store error to an HTTP response. A conflict is 409 so
+// the client can show the clashing records and offer to save anyway.
+func writeEntryErr(w http.ResponseWriter, err error) {
+	var oe *store.OverlapError
+	switch {
+	case errors.As(err, &oe):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": oe.Error(), "conflicts": oe.Conflicts})
+	case errors.As(err, new(store.ActiveEntryError)):
+		writeErr(w, http.StatusConflict, err.Error())
+	case errors.Is(err, sql.ErrNoRows):
+		writeErr(w, http.StatusNotFound, "记录不存在")
+	default:
+		writeErr(w, http.StatusBadRequest, err.Error())
+	}
+}
+
 // POST /api/time-entries  (manual entry)
 func (h *Handler) CreateTimeEntry(w http.ResponseWriter, r *http.Request) {
-	var e models.TimeEntry
-	if err := decodeJSON(r, &e); err != nil {
+	var body timeEntryReq
+	if err := decodeJSON(r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	created, err := store.CreateEntry(h.DB, e)
+	created, err := store.CreateEntry(h.DB, body.entry(), store.WriteOptions{AllowOverlap: body.AllowOverlap})
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeEntryErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
@@ -95,14 +136,14 @@ func (h *Handler) UpdateTimeEntry(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	var e models.TimeEntry
-	if err := decodeJSON(r, &e); err != nil {
+	var body timeEntryReq
+	if err := decodeJSON(r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	updated, err := store.UpdateEntry(h.DB, id, e)
+	updated, err := store.UpdateEntry(h.DB, id, body.entry(), store.WriteOptions{AllowOverlap: body.AllowOverlap})
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeEntryErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
