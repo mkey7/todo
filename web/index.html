@@ -16,6 +16,7 @@
         <button class="tab active" data-view="today">今日</button>
         <button class="tab" data-view="todos">任务</button>
         <button class="tab" data-view="analysis">分析</button>
+        <button class="tab" data-view="summary">总结</button>
         <button class="tab" data-view="settings">设置</button>
       </nav>
       <div class="topbar-spacer"></div>
@@ -144,6 +145,11 @@
       <div id="analysis-content"></div>
     </section>
 
+    <section class="view hidden" id="view-summary" aria-label="总结笔记">
+      <div id="notes-content"></div>
+      <div id="summary-library" class="hidden"><div id="summary-content" aria-live="polite"></div></div>
+    </section>
+
     <!-- ========== 设置 ========== -->
     <section class="view hidden" id="view-settings">
       <div class="card settings-card" id="settings-content"></div>
@@ -167,5 +173,9 @@
 </div>
 
 <script src="/app.js"></script>
+<script src="/note-core.js"></script>
+<script src="/query-views.js"></script>
+<script src="/notes.js"></script>
+<script src="/query-blocks.js"></script>
 </body>
 </html>

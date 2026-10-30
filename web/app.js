@@ -39,12 +39,7 @@ async function api(method, path, body) {
   if (res.status === 204) return null;
   const text = await res.text();
   let data; try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-  if (!res.ok) {
-    const err = new Error((data && data.error) || res.statusText);
-    err.status = res.status;
-    err.data = data;   // 409 conflict responses carry the clashing entries
-    throw err;
-  }
+  if (!res.ok) throw new Error((data && (data.message ? (data.path ? data.path + ': ' : '') + data.message : data.error)) || res.statusText);
   return data;
 }
 
@@ -128,11 +123,12 @@ async function init() {
   bindToday();
   bindTodos();
   bindAnalysis();
+  bindSummary();
   bindModal();
   await loadTags();
   await loadTodos();
   await refreshActiveEntry();
-  renderView('today');
+  renderView(typeof location !== 'undefined' && location.hash.startsWith('#summary') ? 'summary' : 'today');
 }
 
 function startClock() {
@@ -146,6 +142,7 @@ function bindNav() {
   $$('.tab').forEach(t => t.addEventListener('click', () => renderView(t.dataset.view)));
 }
 function renderView(view) {
+  if (state.view === 'summary' && view !== 'summary' && typeof NoteApp !== 'undefined' && !NoteApp.canLeave()) return;
   state.view = view;
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === view));
   $$('.view').forEach(v => v.classList.add('hidden'));
@@ -154,6 +151,7 @@ function renderView(view) {
   if (view === 'todos') renderTodos();
   if (view === 'analysis') renderAnalysis();
   if (view === 'settings') renderSettings();
+  if (view === 'summary') { if (typeof NoteApp !== 'undefined') NoteApp.show(); else loadSummary(); }
 }
 
 function applyTheme() {
@@ -878,22 +876,34 @@ function toggleInlineAnalysis(t, todoItem) {
   renderInlineAnalysis(t, container);
 }
 
-async function renderInlineAnalysis(t, container, requestedMonth) {
-  const previous = inlineAnalysisRenders.get(container);
-  const month = requestedMonth || (previous && previous.todoID === t.id ? previous.month : '') || todayStr().slice(0, 7);
-  const renderState = beginInlineAnalysisRender(container, t.id, month);
-  renderState.todo = t;
-  renderState.container = container;
+const inlineAnalysisRenders = new WeakMap();
+function beginInlineAnalysisRender(container, todoID, month) {
+  const token = { todoID, month };
+  inlineAnalysisRenders.set(container, token);
+  container.replaceChildren();
+  return token;
+}
+function commitInlineAnalysisRender(container, token, nodes) {
+  if (!container.isConnected || inlineAnalysisRenders.get(container) !== token) return false;
+  container.replaceChildren(...nodes);
+  return true;
+}
 
+async function renderInlineAnalysis(t, container) {
+  inlineAnalysisState.todo = t;
+  inlineAnalysisState.container = container;
+  if (!inlineAnalysisState.month) inlineAnalysisState.month = todayStr().slice(0, 7);
+
+  const month = inlineAnalysisState.month;
+  const token = beginInlineAnalysisRender(container, t.id, month);
   const descCount = countDescendants(t);
 
   try {
     const [allEntries, monthEntries] = await Promise.all([
       api('GET', '/api/todos/' + t.id + '/time-entries'),
-      api('GET', '/api/todos/' + t.id + '/time-entries/monthly?month=' + renderState.month),
+      api('GET', '/api/todos/' + t.id + '/time-entries/monthly?month=' + month),
     ]);
-    if (!isCurrentInlineAnalysisRender(container, renderState)) return;
-
+    if (!commitInlineAnalysisRender(container, token, [])) return;
     const totalSecs = allEntries.reduce((acc, e) => acc + entryDurationSecs(e), 0);
     const totalDur = fmtDurationSecs(totalSecs);
     const monthSecs = monthEntries.reduce((acc, e) => acc + entryDurationSecs(e), 0);
@@ -912,9 +922,9 @@ async function renderInlineAnalysis(t, container, requestedMonth) {
     nodes.push(grid);
 
     // Monthly heatmap with navigation
-    nodes.push(el('h4', {}, '月度热力图'));
-    nodes.push(buildHeatmapNav(renderState));
-    nodes.push(buildHeatmap(monthEntries, renderState.month));
+    container.appendChild(el('h4', {}, '月度热力图'));
+    container.appendChild(buildHeatmapNav());
+    container.appendChild(buildHeatmap(monthEntries, month));
 
     // Legend
     nodes.push(buildHeatmapLegend());
@@ -938,9 +948,7 @@ async function renderInlineAnalysis(t, container, requestedMonth) {
     }
     commitInlineAnalysisRender(container, renderState, nodes);
   } catch (err) {
-    if (isCurrentInlineAnalysisRender(container, renderState)) {
-      commitInlineAnalysisRender(container, renderState, [emptyHint('加载失败：' + err.message)]);
-    }
+    commitInlineAnalysisRender(container, token, [emptyHint('加载失败：' + err.message)]);
   }
 }
 
@@ -2076,3 +2084,302 @@ function todoSelect(selectedId, tagIDs) {
 
 // ---------- boot ----------
 document.addEventListener('DOMContentLoaded', init);
+
+// ---------- summary query editor ----------
+const summaryState = {
+  catalog: null, views: [], currentID: null, name: '', query: null,
+  filter: { and: [] }, result: null, resultQuery: null, resultRevision: -1, error: '', busy: false, loading: false, revision: 0,
+};
+function bindSummary() {
+  summaryState.query = newSummaryQuery('todos');
+}
+function newSummaryQuery(source) {
+  return { source, select: [], joins: [], group_by: [], order_by: [], limit: 50, offset: 0 };
+}
+function summarySource() {
+  return summaryState.catalog?.sources.find(s => s.key === summaryState.query.source);
+}
+function summaryFields() {
+  return (summarySource()?.fields || []).filter(f => !f.key.includes('.') || summaryState.query.joins.some(j => j.relation === f.key.split('.')[0]));
+}
+function cleanSummaryPredicate(p) {
+  if (!p) return null;
+  if (p.not) { const child = cleanSummaryPredicate(p.not); return child ? { not: child } : null; }
+  for (const op of ['and', 'or']) {
+    if (p[op]) { const children = p[op].map(cleanSummaryPredicate).filter(Boolean); return children.length ? { [op]: children } : null; }
+  }
+  if (!p.field || !p.op) return null;
+  if (!['is_empty', 'is_not_empty'].includes(p.op) && (p.value === '' || p.value === undefined)) return null;
+  return ['is_empty', 'is_not_empty'].includes(p.op) ? { field: p.field, op: p.op } : { field: p.field, op: p.op, value: p.value };
+}
+function summaryRequest() {
+  const q = JSON.parse(JSON.stringify(summaryState.query));
+  q.select = q.select.filter(s => s.field || s.aggregate === 'count');
+  q.order_by = q.order_by.filter(o => o.key);
+  q.group_by = q.group_by.filter(Boolean);
+  const where = cleanSummaryPredicate(summaryState.filter);
+  if (where) q.where = where;
+  return q;
+}
+function changeSummary(render = true) {
+  summaryState.query.offset = 0;
+  summaryState.revision++;
+  if (render) renderSummary();
+}
+async function loadQueryCatalog() {
+  if (!summaryState.catalog) summaryState.catalog = await api('GET', '/api/query/catalog');
+  return summaryState.catalog;
+}
+async function loadSummary() {
+  if (summaryState.loading) return;
+  summaryState.loading = true;
+  renderSummary();
+  try {
+    await loadQueryCatalog();
+    summaryState.views = await api('GET', '/api/query/views');
+    summaryState.error = '';
+  } catch (err) { summaryState.error = err.message; }
+  finally { summaryState.loading = false; renderSummary(); }
+}
+async function executeSummaryQuery(offset = 0) {
+  if (summaryState.busy) return;
+  summaryState.query.offset = offset;
+  const revision = summaryState.revision;
+  summaryState.busy = true; summaryState.error = ''; renderSummary();
+  try {
+    const result = await api('POST', '/api/query/execute', summaryRequest());
+    if (revision === summaryState.revision) {
+      summaryState.result = result;
+      summaryState.resultQuery = summaryRequest();
+      summaryState.resultRevision = revision;
+    }
+  } catch (err) { if (revision === summaryState.revision) summaryState.error = err.message; }
+  finally { summaryState.busy = false; renderSummary(); }
+}
+function openSummaryView(view) {
+  summaryState.currentID = view.id;
+  summaryState.name = view.name;
+  summaryState.query = JSON.parse(JSON.stringify(view.query));
+  summaryState.filter = summaryState.query.where || { and: [] };
+  delete summaryState.query.where;
+  summaryState.result = null; summaryState.error = ''; summaryState.revision++;
+  renderSummary();
+}
+function resetSummary(source = summaryState.query.source) {
+  summaryState.query = newSummaryQuery(source);
+  summaryState.filter = { and: [] }; summaryState.currentID = null; summaryState.name = '';
+  summaryState.result = null; summaryState.error = ''; summaryState.revision++;
+  renderSummary();
+}
+async function saveSummaryView(copy = false) {
+  if (summaryState.busy) return;
+  const name = summaryState.name.trim();
+  if (!name) { summaryState.error = 'name: 请输入视图名称'; renderSummary(); return; }
+  const id = copy ? null : summaryState.currentID;
+  const revision = summaryState.revision;
+  summaryState.busy = true; summaryState.error = ''; renderSummary();
+  try {
+    const view = await api(id ? 'PUT' : 'POST', '/api/query/views' + (id ? '/' + id : ''), { name, query: summaryRequest() });
+    if (revision === summaryState.revision) { summaryState.currentID = view.id; summaryState.name = view.name; }
+    summaryState.views = await api('GET', '/api/query/views');
+  } catch (err) { summaryState.error = err.message; }
+  finally { summaryState.busy = false; renderSummary(); }
+}
+async function deleteSummaryView() {
+  if (summaryState.busy || !summaryState.currentID) return;
+  summaryState.busy = true; summaryState.error = ''; renderSummary();
+  try {
+    await api('DELETE', '/api/query/views/' + summaryState.currentID);
+    resetSummary();
+    summaryState.views = await api('GET', '/api/query/views');
+  } catch (err) { summaryState.error = err.message; }
+  finally { summaryState.busy = false; renderSummary(); }
+}
+function summarySelect(label, options, value, onChange, path) {
+  const select = el('select', { class: 'select', 'aria-label': label, 'data-path': path, onchange: e => onChange(e.target.value) });
+  for (const option of options) select.appendChild(el('option', { value: option.key }, option.label || option.key));
+  select.value = value || '';
+  return select;
+}
+function summaryFieldOptions() { return [{ key: '', label: '选择字段' }, ...summaryFields()]; }
+function summaryButton(label, fn, disabled = false) {
+  const button = el('button', { class: 'btn btn-small', type: 'button', onclick: fn }, label);
+  button.disabled = disabled || summaryState.busy;
+  return button;
+}
+function summaryInput(label, value, onInput, attrs = {}) {
+  const input = el('input', { class: 'input', 'aria-label': label, ...attrs, oninput: e => onInput(e.target.value) });
+  input.value = value ?? '';
+  return input;
+}
+function summaryOutputKey(s) { return s.alias || (s.aggregate ? s.aggregate + (s.field ? '_' + s.field : '') : s.field); }
+const summaryAggregateLabels = { count: '计数', count_distinct: '去重计数', sum: '求和', avg: '平均', min: '最小', max: '最大' };
+const summaryOperatorLabels = { eq: '等于', neq: '不等于', contains: '包含', starts_with: '开头为', gt: '大于', gte: '大于等于', lt: '小于', lte: '小于等于', in: '属于（数字以逗号分隔）', between: '范围（以逗号分隔）', is_empty: '为空', is_not_empty: '不为空' };
+function renderSummary() {
+  const host = $('#summary-content'); if (!host) return;
+  host.replaceChildren();
+  const layout = el('div', { class: 'summary-layout' });
+  const sidebar = el('aside', { class: 'card summary-views' }, el('h3', {}, '已保存视图'), summaryButton('＋ 新建总结', () => resetSummary()));
+  if (!summaryState.views.length) sidebar.appendChild(emptyHint('尚无保存的视图'));
+  for (const view of summaryState.views) {
+    const button = summaryButton(view.name, () => openSummaryView(view));
+    if (view.id === summaryState.currentID) button.setAttribute('aria-current', 'true');
+    sidebar.appendChild(button);
+  }
+  const main = el('div', { class: 'summary-main stack' });
+  layout.append(sidebar, main); host.appendChild(layout);
+  if (summaryState.error) main.appendChild(el('div', { class: 'summary-error', role: 'alert' }, summaryState.error));
+  if (!summaryState.catalog) {
+    main.appendChild(emptyHint(summaryState.loading ? '正在加载查询目录…' : '无法加载目录'));
+    if (!summaryState.loading) main.appendChild(summaryButton('重试', loadSummary));
+    return;
+  }
+  const editor = createSummaryEditor(summaryState, {
+    change: changeSummary,
+    render: renderSummary,
+    execute: executeSummaryQuery,
+  });
+  const save = el('div', { class: 'summary-row' }, summaryInput('视图名称', summaryState.name, value => { summaryState.name = value; }, { placeholder: '视图名称（修改后保存即可重命名）', 'data-path': 'name' }),
+    summaryButton('保存视图', () => saveSummaryView()), summaryButton('另存副本', () => saveSummaryView(true)), summaryButton('删除视图', deleteSummaryView, !summaryState.currentID));
+  editor.appendChild(save); main.appendChild(editor);
+  if (summaryState.result) main.appendChild(renderSummaryResult(summaryState.result));
+  else main.appendChild(emptyHint('配置查询后点击“刷新结果”'));
+  if (summaryState.error.includes(':')) {
+    const path = summaryState.error.split(':')[0];
+    $$('[data-path]', editor).forEach(n => { if (n.dataset.path === path) n.setAttribute('aria-invalid', 'true'); });
+  }
+}
+function renderSummaryPredicate(p, replace, depth, path) {
+ return renderQueryPredicate(p,replace,depth,path,{fields:summaryFields,change:changeSummary,button:summaryButton});
+}
+function renderQueryPredicate(p, replace, depth, path, controller) {
+ const summaryFields=controller.fields,changeSummary=controller.change,summaryButton=controller.button;
+ const summaryFieldOptions=()=>[{key:'',label:'选择字段'},...summaryFields()];
+ const renderSummaryPredicate=(p,replace,depth,path)=>renderQueryPredicate(p,replace,depth,path,controller);
+  const box = el('div', { class: 'summary-predicate', 'data-id': path, 'data-path': path });
+  const kind = p.not ? 'not' : p.or ? 'or' : p.and ? 'and' : 'leaf';
+  const choices = [{ key: 'leaf', label: '条件' }, { key: 'and', label: '全部满足 AND' }, { key: 'or', label: '任一满足 OR' }, { key: 'not', label: '取反 NOT' }];
+  box.appendChild(summarySelect('条件类型 ' + path, depth < 5 ? choices : choices.filter(c => c.key === 'leaf'), kind, value => replace(value === 'leaf' ? { field: '', op: 'eq', value: '' } : value === 'not' ? { not: { field: '', op: 'eq', value: '' } } : { [value]: p.and || p.or || [] })));
+  if (kind === 'not') box.appendChild(renderSummaryPredicate(p.not, value => { p.not = value; changeSummary(); }, depth + 1, path + '.not'));
+  else if (kind === 'and' || kind === 'or') {
+    p[kind].forEach((child, i) => box.appendChild(el('div', { class: 'summary-condition' }, renderSummaryPredicate(child, value => { p[kind][i] = value; changeSummary(); }, depth + 1, `${path}.${kind}[${i}]`), summaryButton('移除条件', () => { p[kind].splice(i, 1); changeSummary(); }))));
+    box.appendChild(summaryButton('＋ 条件或分组', () => { p[kind].push({ field: '', op: 'eq', value: '' }); changeSummary(); }, p[kind].length >= 20 || depth >= 5));
+  } else {
+    const field = summaryFields().find(f => f.key === p.field);
+    box.appendChild(summarySelect('筛选字段 ' + path, summaryFieldOptions(), p.field, value => { p.field = value; p.op = summaryFields().find(f => f.key === value)?.operators[0] || 'eq'; p.value = ''; changeSummary(); }, path + '.field'));
+    box.appendChild(summarySelect('操作符 ' + path, [...(field?.operators || ['eq']),...(controller.note ? field?.note_filter_ops || [] : [])].map(key => ({ key, label: key==='in_relative_range'?'相对日期':summaryOperatorLabels[key] })), p.op, value => { p.op = value; p.value = value==='in_relative_range'?'this_week':''; changeSummary(); }, path + '.op'));
+    if(controller.note&&field?.type==='number')box.appendChild(summaryButton('设置数值范围',()=>{replace({and:[{field:p.field,op:'gte',value:''},{field:p.field,op:'lte',value:''}]});}));
+    if(p.op==='in_relative_range') {
+      box.appendChild(summarySelect('相对日期 '+path,[{key:'today',label:'今天'},{key:'this_week',label:'本周'},{key:'this_month',label:'本月'},{key:'past_7_days',label:'最近7天'}],p.value||'',v=>{p.value=v;changeSummary(false);}));
+    } else if (!['is_empty', 'is_not_empty'].includes(p.op)) {
+      if (field?.type === 'boolean') box.appendChild(summarySelect('筛选值 ' + path, [{ key: '', label: '选择布尔值' }, { key: 'true', label: '是' }, { key: 'false', label: '否' }], p.value === '' ? '' : String(p.value), value => { p.value = value === '' ? '' : value === 'true'; changeSummary(false); }, path + '.value'));
+      else if(controller.note&&field?.type==='date') {
+        const type=['date','due_date'].includes(p.field.split('.').at(-1))?'date':'datetime-local';
+        const normalize=value=>type==='datetime-local'&&value?(value.length===16?value+':00':value).replace('T',' '):value;
+        if(p.op==='between') {
+          const values=Array.isArray(p.value)?p.value:['',''];
+          for(let i=0;i<2;i++){const input=summaryInput((i?'范围上限 ':'范围下限 ')+path,String(values[i]||'').replace(' ','T'),v=>{p.value=[...values];p.value[i]=normalize(v);values[i]=p.value[i];changeSummary(false);},{type});box.appendChild(input);}
+        } else box.appendChild(summaryInput('筛选值 '+path,String(p.value||'').replace(' ','T'),v=>{p.value=normalize(v);changeSummary(false);},{type}));
+      }
+      else {
+        const array = ['in', 'between'].includes(p.op);
+        const value = Array.isArray(p.value) ? p.value.join(', ') : p.value;
+        box.appendChild(summaryInput('筛选值 ' + path, value, input => {
+          p.value = input === '' ? '' : array ? input.split(',').map(v => field?.type === 'number' && v.trim() !== '' && Number.isFinite(Number(v.trim())) ? Number(v.trim()) : v.trim()) : field?.type === 'number' && Number.isFinite(Number(input)) ? Number(input) : input;
+          changeSummary(false);
+        }, { type: field?.type === 'number' && !array ? 'number' : 'text', step: 'any', placeholder: field?.type === 'date' ? 'YYYY-MM-DD 或 YYYY-MM-DD HH:mm:ss（范围以逗号分隔）' : array ? '值1, 值2' : '值', 'data-path': path + '.value' }));
+      }
+    }
+  }
+  return box;
+}
+function renderSummaryResult(result) {
+  const card = el('div', { class: 'card summary-results' }, el('h3', {}, `查询结果 · 返回 ${result.row_count} 行 / 共 ${result.total_count} 行`));
+  const aggregates = Object.entries(result.aggregates || {});
+  if (aggregates.length) card.appendChild(el('p', {}, aggregates.map(([k, v]) => k + ': ' + (v ?? '∅')).join(' · ')));
+  if (!result.rows.length) card.appendChild(emptyHint('没有符合条件的记录'));
+  else {
+    const table = el('table', { class: 'summary-table' });
+    table.appendChild(el('thead', {}, el('tr', {}, ...result.columns.map(c => el('th', { scope: 'col' }, c.label, el('small', {}, c.type))))));
+    const body = el('tbody');
+    for (const row of result.rows) body.appendChild(el('tr', {}, ...result.columns.map(c => el('td', { class: c.type === 'number' ? 'summary-number' : '', title: row[c.key] == null ? '空值' : String(row[c.key]) }, row[c.key] == null ? '∅' : String(row[c.key])))));
+    table.appendChild(body); card.appendChild(el('div', { class: 'summary-table-scroll', tabindex: '0', 'aria-label': '查询结果表格' }, table));
+  }
+  const q = summaryState.resultQuery || summaryState.query;
+  const stale = summaryState.resultRevision !== summaryState.revision;
+  if (stale) card.appendChild(el('p', { class: 'muted' }, '查询已修改，请刷新结果后翻页'));
+  card.appendChild(el('div', { class: 'summary-row' }, summaryButton('上一页', () => executeSummaryQuery(Math.max(0, q.offset - q.limit)), q.offset <= 0 || stale), el('span', {}, `第 ${Math.floor(q.offset / q.limit) + 1} 页`), summaryButton('下一页', () => executeSummaryQuery(result.next_offset), result.next_offset == null || result.next_offset > 100000 || stale),
+    summaryInput('跳至页码', '', value => {}, { type: 'number', min: 1, max: Math.floor(100000 / q.limit) + 1, placeholder: '页码', onchange: e => { const page = Number(e.target.value); if (!stale && Number.isInteger(page) && page >= 1 && (page - 1) * q.limit <= 100000) executeSummaryQuery((page - 1) * q.limit); } })));
+  return card;
+}
+
+
+// The query library and each note block own separate controllers.
+function createSummaryEditor(summaryState, actions) {
+ const summarySource = () => summaryState.catalog?.sources.find(s => s.key === summaryState.query.source);
+ const summaryFields = () => (summarySource()?.fields || []).filter(f => !f.key.includes('.') || summaryState.query.joins.some(j => j.relation === f.key.split('.')[0]));
+ const summaryFieldOptions = () => [{key:'',label:'选择字段'},...summaryFields()];
+ const summaryButton = (label, fn, disabled=false) => { const b=el('button',{class:'btn btn-small',type:'button',onclick:fn},label); b.disabled=disabled||summaryState.busy;return b; };
+ const changeSummary = actions.change;
+ const renderSummary = actions.render;
+ const executeSummaryQuery = actions.execute;
+ const renderSummaryPredicate = (p,replace,depth,path) => renderQueryPredicate(p,replace,depth,path,{fields:summaryFields,change:changeSummary,button:summaryButton,note:actions.note});
+  const editor = el('fieldset', { class: 'card summary-editor' });
+  editor.disabled = summaryState.busy;
+  editor.appendChild(el('legend', {}, '查询定义'));
+  const q = summaryState.query;
+  editor.appendChild(el('div', { class: 'summary-row' }, el('label', {}, '数据源'), summarySelect('数据源', summaryState.catalog.sources, q.source, value => { if(actions.beforeSourceChange&&!actions.beforeSourceChange(value)){renderSummary();return;}summaryState.query = newSummaryQuery(value); summaryState.filter = { and: [] }; changeSummary(); }, 'source')));
+  const relations = el('div', { class: 'summary-row' }, el('span', {}, '关联'));
+  for (const relation of summarySource().relations) {
+    const check = el('input', { type: 'checkbox', onchange: () => {
+      if (check.checked) q.joins.push({ relation: relation.key }); else q.joins = q.joins.filter(j => j.relation !== relation.key);
+      changeSummary();
+    } });
+    check.checked = q.joins.some(j => j.relation === relation.key);
+    check.disabled = !check.checked && q.joins.length >= 3;
+    relations.appendChild(el('label', {}, check, relation.label));
+  }
+  editor.appendChild(relations);
+  const fields = el('div', { class: 'summary-section', 'data-path': 'select' }, el('h4', {}, '返回字段与聚合'));
+  if (!q.select.length) fields.appendChild(el('p', { class: 'muted' }, '未选择时使用数据源默认列'));
+  q.select.forEach((item, i) => {
+    const field = summaryFields().find(f => f.key === item.field);
+    const aggregates = actions.mode==='detail'?[]:item.field ? field?.aggregates || [] : ['count'];
+    fields.appendChild(el('div', { class: 'summary-row', 'data-path': `select[${i}]` },
+      summarySelect('返回字段 ' + (i + 1), [{ key: '', label: '无字段（count 统计行数）' }, ...summaryFields()], item.field, value => { item.field = value; if (!value) item.aggregate = 'count'; else if (!(summaryFields().find(f => f.key === value)?.aggregates || []).includes(item.aggregate)) item.aggregate = ''; changeSummary(); }, `select[${i}].field`),
+      summarySelect('聚合 ' + (i + 1), [{ key: '', label: '普通字段' }, ...aggregates.map(key => ({ key, label: summaryAggregateLabels[key] }))], item.aggregate, value => { item.aggregate = value; changeSummary(); }, `select[${i}].aggregate`),
+      summaryInput('别名 ' + (i + 1), item.alias, value => { item.alias = value; changeSummary(false); }, { placeholder: '显示名（可选）', 'data-path': `select[${i}].alias`, onchange: () => renderSummary() }),
+      summaryButton('移除字段', () => { q.select.splice(i, 1); changeSummary(); }),
+      ...(actions.note?[summaryButton('字段上移',()=>{if(i>0)[q.select[i-1],q.select[i]]=[q.select[i],q.select[i-1]];changeSummary();},i===0),summaryButton('字段下移',()=>{if(i<q.select.length-1)[q.select[i],q.select[i+1]]=[q.select[i+1],q.select[i]];changeSummary();},i===q.select.length-1)]:[])
+    ));
+  });
+  fields.appendChild(summaryButton('＋ 返回字段', () => { q.select.push({ field: summaryFields()[0].key }); changeSummary(); }, q.select.length >= 20));
+  editor.appendChild(fields);
+  editor.appendChild(el('div', { class: 'summary-section' }, el('h4', {}, '筛选'), renderSummaryPredicate(summaryState.filter, p => { summaryState.filter = p; changeSummary(); }, 1, 'where')));
+  const groups = el('div', { class: 'summary-section', 'data-path': 'group_by' }, el('h4', {}, '分组'));
+  q.group_by.forEach((key, i) => groups.appendChild(el('div', { class: 'summary-row' },
+    summarySelect('分组字段 ' + (i + 1), summaryFieldOptions(), key, value => { q.group_by[i] = value; changeSummary(); }, `group_by[${i}]`),
+    summaryButton('移除分组', () => { q.group_by.splice(i, 1); changeSummary(); })
+  )));
+  groups.appendChild(summaryButton('＋ 分组字段', () => { q.group_by.push(''); changeSummary(); }, q.group_by.length >= 20));
+  editor.appendChild(groups);
+  const orderOptions = new Map(summaryFields().map(f => [f.key, f]));
+  q.select.forEach(s => { const key = summaryOutputKey(s); if (key) orderOptions.set(key, { key, label: key }); });
+  const orders = el('div', { class: 'summary-section', 'data-path': 'order_by' }, el('h4', {}, '排序'));
+  q.order_by.forEach((item, i) => orders.appendChild(el('div', { class: 'summary-row' },
+    summarySelect('排序字段 ' + (i + 1), [{ key: '', label: '选择字段或聚合别名' }, ...orderOptions.values()], item.key, value => { item.key = value; changeSummary(); }, `order_by[${i}].key`),
+    summarySelect('排序方向 ' + (i + 1), [{ key: 'asc', label: '升序' }, { key: 'desc', label: '降序' }], item.direction, value => { item.direction = value; changeSummary(); }),
+    summaryButton('移除排序', () => { q.order_by.splice(i, 1); changeSummary(); }),
+    ...(actions.note?[summaryButton('排序上移',()=>{if(i>0)[q.order_by[i-1],q.order_by[i]]=[q.order_by[i],q.order_by[i-1]];changeSummary();},i===0),summaryButton('排序下移',()=>{if(i<q.order_by.length-1)[q.order_by[i],q.order_by[i+1]]=[q.order_by[i+1],q.order_by[i]];changeSummary();},i===q.order_by.length-1)]:[])
+  )));
+  orders.appendChild(summaryButton('＋ 排序', () => { q.order_by.push({ key: '', direction: 'asc' }); changeSummary(); }, q.order_by.length >= 20));
+  editor.appendChild(orders);
+  editor.appendChild(el('div', { class: 'summary-row' }, el('label', {}, '每页条数'), summaryInput('每页条数', q.limit, value => { q.limit = Number(value); changeSummary(false); }, { type: 'number', min: 1, max: 500, 'data-path': 'limit' }), summaryButton(summaryState.busy ? '正在执行…' : '刷新结果', () => executeSummaryQuery())));
+ if(actions.note){
+  const sections=[...editor.children];sections[1]?.setAttribute('data-editor-section','source');relations.dataset.editorSection='source';fields.dataset.editorSection='fields';
+  const filter=fields.nextElementSibling;if(filter)filter.dataset.editorSection='filter';groups.dataset.editorSection='aggregate';orders.dataset.editorSection='sort';
+  if(actions.mode==='detail')groups.classList.add('hidden');
+  editor.lastElementChild?.setAttribute('data-editor-section','page');
+ }
+ return editor;
+}

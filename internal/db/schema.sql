@@ -54,3 +54,24 @@ CREATE INDEX IF NOT EXISTS idx_todos_parent       ON todos(parent_id);
 CREATE INDEX IF NOT EXISTS idx_time_entries_start ON time_entries(start_time);
 CREATE INDEX IF NOT EXISTS idx_time_entries_todo  ON time_entries(todo_id);
 CREATE INDEX IF NOT EXISTS idx_todo_tags_tag ON todo_tags(tag_id);
+
+CREATE TABLE IF NOT EXISTS query_views (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    query_json TEXT NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_query_views_updated ON query_views(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    import_key TEXT UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(deleted_at, updated_at DESC, id DESC);
