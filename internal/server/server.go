@@ -30,6 +30,22 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 
 	// --- API ---
+	mux.HandleFunc("GET /api/note-functions", h.NoteFunctions)
+	mux.HandleFunc("POST /api/note-query/execute", h.ExecuteNoteQuery)
+	mux.HandleFunc("GET /api/notes", h.ListNotes)
+	mux.HandleFunc("POST /api/notes", h.CreateNote)
+	mux.HandleFunc("POST /api/notes/import-summary", h.ImportSummary)
+	mux.HandleFunc("GET /api/notes/{id}", h.GetNote)
+	mux.HandleFunc("PUT /api/notes/{id}", h.UpdateNote)
+	mux.HandleFunc("DELETE /api/notes/{id}", h.DeleteNote)
+	mux.HandleFunc("POST /api/notes/{id}/restore", h.RestoreNote)
+	mux.HandleFunc("GET /api/query/catalog", h.QueryCatalog)
+	mux.HandleFunc("POST /api/query/execute", h.ExecuteQuery)
+	mux.HandleFunc("GET /api/query/views", h.ListQueryViews)
+	mux.HandleFunc("POST /api/query/views", h.CreateQueryView)
+	mux.HandleFunc("PUT /api/query/views/{id}", h.UpdateQueryView)
+	mux.HandleFunc("DELETE /api/query/views/{id}", h.DeleteQueryView)
+
 	mux.HandleFunc("GET /api/tags", h.ListTags)
 	mux.HandleFunc("POST /api/tags", h.CreateTag)
 	mux.HandleFunc("PUT /api/tags/{id}", h.UpdateTag)
