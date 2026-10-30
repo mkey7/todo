@@ -2,11 +2,34 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"todo/internal/models"
 	"todo/internal/tutil"
 )
+
+// endOfTime is a far-future sentinel used as the end of an in-progress entry
+// when checking for overlaps, so an open entry conflicts with everything that
+// starts after it.
+const endOfTime = "9999-12-31 23:59:59"
+
+// OverlapError reports that a write would overlap existing time entries.
+// Callers may retry with WriteOptions{AllowOverlap: true} to accept it.
+type OverlapError struct {
+	Conflicts []models.TimeEntry
+}
+
+func (e *OverlapError) Error() string {
+	return fmt.Sprintf("该时间段与 %d 条已有记录重叠", len(e.Conflicts))
+}
+
+// ActiveEntryError reports that a write would create a second in-progress
+// entry. Unlike OverlapError this is never waivable: the app assumes at most
+// one running entry.
+type ActiveEntryError struct{}
+
+func (ActiveEntryError) Error() string { return "已有进行中的记录，请先停止" }
 
 func scanEntry(scanner interface{ Scan(...any) error }) (models.TimeEntry, error) {
 	var e models.TimeEntry
@@ -33,11 +56,29 @@ func scanEntry(scanner interface{ Scan(...any) error }) (models.TimeEntry, error
 const entryColumns = `te.id, te.todo_id, te.tag_id, te.start_time, te.end_time, te.note, te.created_at,
 	g.name AS tag_name, g.color AS tag_color, t.title AS todo_title`
 
-func entryQuery(where string) string {
+func entryQueryOrder(where, order string) string {
 	return fmt.Sprintf(`SELECT %s FROM time_entries te
 		LEFT JOIN tags g ON g.id = te.tag_id
 		LEFT JOIN todos t ON t.id = te.todo_id
-		WHERE %s ORDER BY te.start_time ASC`, entryColumns, where)
+		WHERE %s ORDER BY te.start_time %s`, entryColumns, where, order)
+}
+
+func entryQuery(where string) string {
+	return entryQueryOrder(where, "ASC")
+}
+
+// collectEntries drains a rows cursor into a slice of entries.
+func collectEntries(rows *sql.Rows) ([]models.TimeEntry, error) {
+	defer rows.Close()
+	var es []models.TimeEntry
+	for rows.Next() {
+		e, err := scanEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		es = append(es, e)
+	}
+	return es, rows.Err()
 }
 
 // ListEntriesForDay returns entries overlapping the given date.
@@ -51,21 +92,31 @@ func ListEntriesInRange(db *sql.DB, start, end string) ([]models.TimeEntry, erro
 	return listEntriesOverlapping(db, start, end)
 }
 
+// overlapWhere matches entries overlapping [start, end): an entry whose end is
+// open (in progress) always ends after start. Touching intervals do not count.
+const overlapWhere = `te.start_time < ? AND (te.end_time IS NULL OR te.end_time > ?)`
+
 func listEntriesOverlapping(db *sql.DB, start, end string) ([]models.TimeEntry, error) {
-	rows, err := db.Query(entryQuery(`te.start_time < ? AND (te.end_time IS NULL OR te.end_time > ?)`), end, start)
+	rows, err := db.Query(entryQuery(overlapWhere), end, start)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var es []models.TimeEntry
-	for rows.Next() {
-		e, err := scanEntry(rows)
-		if err != nil {
-			return nil, err
-		}
-		es = append(es, e)
+	return collectEntries(rows)
+}
+
+// findOverlaps returns entries overlapping [start, end), excluding excludeID
+// when it is > 0 (so an entry being updated does not conflict with itself).
+func findOverlaps(db *sql.DB, excludeID int64, start, end string) ([]models.TimeEntry, error) {
+	where, args := overlapWhere, []any{end, start}
+	if excludeID > 0 {
+		where += ` AND te.id <> ?`
+		args = append(args, excludeID)
 	}
-	return es, rows.Err()
+	rows, err := db.Query(entryQuery(where), args...)
+	if err != nil {
+		return nil, err
+	}
+	return collectEntries(rows)
 }
 
 // GetEntry fetches a single entry by id.
@@ -125,9 +176,10 @@ func StopEntry(db *sql.DB) (models.TimeEntry, error) {
 	return GetEntry(db, id)
 }
 
-// ActiveEntry returns the currently running entry, or nil if none.
+// ActiveEntry returns the currently running entry, or nil if none. It picks the
+// most recently started one so it always agrees with StopEntry.
 func ActiveEntry(db *sql.DB) (*models.TimeEntry, error) {
-	row := db.QueryRow(entryQuery(`te.end_time IS NULL`))
+	row := db.QueryRow(entryQueryOrder(`te.end_time IS NULL`, "DESC"))
 	e, err := scanEntry(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -138,13 +190,69 @@ func ActiveEntry(db *sql.DB) (*models.TimeEntry, error) {
 	return &e, nil
 }
 
-// CreateEntry inserts a fully-specified entry (for manual back-filling).
-func CreateEntry(db *sql.DB, e models.TimeEntry) (models.TimeEntry, error) {
+// WriteOptions tunes how a manual entry is validated.
+type WriteOptions struct {
+	// AllowOverlap accepts a span that overlaps existing entries. It never
+	// waives the single-in-progress-entry rule.
+	AllowOverlap bool
+}
+
+// validateEntry normalizes and validates a manual entry before it is written.
+// excludeID skips an existing row (used when updating) both for the overlap
+// check and the in-progress check.
+func validateEntry(db *sql.DB, excludeID int64, e *models.TimeEntry) error {
 	if e.StartTime == "" {
 		e.StartTime = tutil.Now()
 	}
-	if e.EndTime != nil && *e.EndTime != "" && *e.EndTime <= e.StartTime {
-		return models.TimeEntry{}, fmt.Errorf("结束时间必须晚于开始时间")
+	start, err := tutil.ParseStrict(e.StartTime)
+	if err != nil {
+		return fmt.Errorf("开始时间格式无效")
+	}
+	if e.EndTime != nil && *e.EndTime == "" {
+		e.EndTime = nil
+	}
+	var end string
+	if e.EndTime != nil {
+		et, err := tutil.ParseStrict(*e.EndTime)
+		if err != nil {
+			return fmt.Errorf("结束时间格式无效")
+		}
+		if !et.After(start) {
+			return fmt.Errorf("结束时间必须晚于开始时间")
+		}
+		end = *e.EndTime
+	} else {
+		// Only one entry may be in progress at a time.
+		query := `SELECT id FROM time_entries WHERE end_time IS NULL`
+		args := []any{}
+		if excludeID > 0 {
+			query += ` AND id <> ?`
+			args = append(args, excludeID)
+		}
+		query += ` LIMIT 1`
+		var id int64
+		switch err := db.QueryRow(query, args...).Scan(&id); {
+		case err == nil:
+			return ActiveEntryError{}
+		case !errors.Is(err, sql.ErrNoRows):
+			return err
+		}
+		end = endOfTime
+	}
+	conflicts, err := findOverlaps(db, excludeID, e.StartTime, end)
+	if err != nil {
+		return err
+	}
+	if len(conflicts) > 0 {
+		return &OverlapError{Conflicts: conflicts}
+	}
+	return nil
+}
+
+// CreateEntry inserts a fully-specified entry (for manual back-filling).
+func CreateEntry(db *sql.DB, e models.TimeEntry, opts WriteOptions) (models.TimeEntry, error) {
+	if err := validateEntry(db, 0, &e); err != nil && !(opts.AllowOverlap && isOverlap(err)) {
+		return models.TimeEntry{}, err
 	}
 	if e.TagID == nil && e.TodoID != nil {
 		if primary, err := primaryTagID(db, *e.TodoID); err == nil {
@@ -164,20 +272,30 @@ func CreateEntry(db *sql.DB, e models.TimeEntry) (models.TimeEntry, error) {
 }
 
 // UpdateEntry replaces editable fields of an entry.
-func UpdateEntry(db *sql.DB, id int64, e models.TimeEntry) (models.TimeEntry, error) {
-	if e.EndTime != nil && *e.EndTime != "" && *e.EndTime <= e.StartTime {
-		return models.TimeEntry{}, fmt.Errorf("结束时间必须晚于开始时间")
+func UpdateEntry(db *sql.DB, id int64, e models.TimeEntry, opts WriteOptions) (models.TimeEntry, error) {
+	if err := validateEntry(db, id, &e); err != nil && !(opts.AllowOverlap && isOverlap(err)) {
+		return models.TimeEntry{}, err
 	}
 	if e.TagID == nil && e.TodoID != nil {
 		if primary, err := primaryTagID(db, *e.TodoID); err == nil {
 			e.TagID = primary
 		}
 	}
-	if _, err := db.Exec(`UPDATE time_entries SET todo_id = ?, tag_id = ?, start_time = ?, end_time = ?, note = ? WHERE id = ?`,
-		e.TodoID, e.TagID, e.StartTime, e.EndTime, e.Note, id); err != nil {
+	res, err := db.Exec(`UPDATE time_entries SET todo_id = ?, tag_id = ?, start_time = ?, end_time = ?, note = ? WHERE id = ?`,
+		e.TodoID, e.TagID, e.StartTime, e.EndTime, e.Note, id)
+	if err != nil {
 		return models.TimeEntry{}, err
 	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return models.TimeEntry{}, sql.ErrNoRows
+	}
 	return GetEntry(db, id)
+}
+
+// isOverlap reports whether err is an OverlapError (the only waivable failure).
+func isOverlap(err error) bool {
+	var oe *OverlapError
+	return errors.As(err, &oe)
 }
 
 // DeleteEntry removes an entry.
@@ -198,16 +316,7 @@ func ListEntriesForTodos(db *sql.DB, todoIDs []int64) ([]models.TimeEntry, error
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var es []models.TimeEntry
-	for rows.Next() {
-		e, err := scanEntry(rows)
-		if err != nil {
-			return nil, err
-		}
-		es = append(es, e)
-	}
-	return es, rows.Err()
+	return collectEntries(rows)
 }
 
 // ListEntriesForTodosInRange returns time entries for the given todo IDs
@@ -223,16 +332,7 @@ func ListEntriesForTodosInRange(db *sql.DB, todoIDs []int64, start, end string) 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var es []models.TimeEntry
-	for rows.Next() {
-		e, err := scanEntry(rows)
-		if err != nil {
-			return nil, err
-		}
-		es = append(es, e)
-	}
-	return es, rows.Err()
+	return collectEntries(rows)
 }
 
 func primaryTagID(db *sql.DB, todoID int64) (*int64, error) {

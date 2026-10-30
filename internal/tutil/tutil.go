@@ -170,6 +170,13 @@ func PartOfDay(hour int) string {
 	}
 }
 
+// ParseStrict parses a full storage datetime ("2006-01-02 15:04:05"). Unlike
+// ParseStorage it never falls back to the current time, so callers can use it
+// to reject malformed input instead of silently storing it.
+func ParseStrict(s string) (time.Time, error) {
+	return time.ParseInLocation(Layout, s, time.Local)
+}
+
 // ParseStorage parses a storage datetime string into local time.
 func ParseStorage(s string) time.Time {
 	t, err := time.ParseInLocation(Layout, s, time.Local)

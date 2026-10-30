@@ -55,6 +55,7 @@ const state = {
   analysisDate: todayStr(),
   analysisWeek: '',
   todayTaskTag: '',
+  bfTagDefaulted: false,   // 补录卡片的标签筛选只在首次渲染时给默认值
   timelineZoom: '12h',     // '24h' | configured work range
   weekHourPx: 90,          // weekly vertical timeline: pixels per hour (zoom)
   todoFilter: 'all',       // 'all' | 'pending' | 'done'
@@ -224,8 +225,12 @@ function bindToday() {
   $('#bf-group').addEventListener('change', () => {
     const gid = $('#bf-group').value ? Number($('#bf-group').value) : null;
     fillTodoSelect($('#bf-todo'), null, gid);
+    updateBackfillPreview();
   });
-  $('#bf-end').addEventListener('click', () => { $('#bf-start').value = ''; });
+  // 起止时间变化时刷新时长预览。
+  for (const id of ['#bf-date', '#bf-start', '#bf-end-date', '#bf-end']) {
+    $(id).addEventListener('input', updateBackfillPreview);
+  }
   // 补录
   $('#bf-add').addEventListener('click', onBackfillAdd);
   // 任务与分组
@@ -252,14 +257,52 @@ async function renderToday() {
   await renderTodayEntries();
 }
 
-// 填充补录任务下拉
+// 填充补录任务下拉。重复渲染会保留用户已选的标签筛选与任务，
+// 只在首次渲染时给出「进行中」默认值，这样连续补录不会丢失选择。
 function renderRecorder() {
   const progressID = tagIDByName('进行中');
   fillTagSelect($('#bf-group'), progressID);
-  $('#bf-group').value = progressID ? String(progressID) : '';
+  if (!state.bfTagDefaulted) {
+    $('#bf-group').value = progressID ? String(progressID) : '';
+    state.bfTagDefaulted = true;
+  }
   fillTodoSelect($('#bf-todo'), null, $('#bf-group').value ? Number($('#bf-group').value) : null);
   if (!$('#bf-date').value) { $('#bf-date').value = todayStr(); $('#bf-end-date').value = todayStr(); }
+  updateBackfillPreview();
   renderTimer();
+}
+
+// 把 YYYY-MM-DD 与 HH:MM 组合成本地时间戳；任一项缺失或无效时返回 NaN。
+function localDateTimeMs(dateStr, timeStr) {
+  if (!dateStr || !timeStr) return NaN;
+  return new Date(`${dateStr}T${timeStr}:00`).getTime();
+}
+
+// 本地时间戳 → HH:MM / YYYY-MM-DD（使用本地字段，不用 UTC 方法）。
+const hhmm = (ms) => {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+const ymd = (ms) => {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+// 补录卡片的时长预览：合法时显示时长，未填结束时间时说明会记为进行中。
+function updateBackfillPreview() {
+  const host = $('#bf-preview');
+  if (!host) return;
+  const sd = $('#bf-date').value || todayStr();
+  const st = $('#bf-start').value;
+  const ed = $('#bf-end-date').value || sd;
+  const en = $('#bf-end').value;
+  host.classList.remove('invalid');
+  if (!st) { host.textContent = '—'; host.classList.add('invalid'); return; }
+  if (!en) { host.textContent = '未填结束时间（将记为进行中）'; return; }
+  const startMs = localDateTimeMs(sd, st);
+  const endMs = localDateTimeMs(ed, en);
+  if (!(endMs > startMs)) { host.textContent = '—'; host.classList.add('invalid'); return; }
+  host.textContent = '时长 ' + fmtDurationSecs((endMs - startMs) / 1000);
 }
 
 function fillTagSelect(sel, selectedId) {
@@ -381,6 +424,25 @@ async function onTimerToggle() {
   } catch (e) { alert(e.message); }
 }
 
+// 提交工时记录；遇到 409 冲突时列出冲突记录并确认，确认后带 allow_overlap 重发。
+// 用户取消时把 err.handled 置为 true，调用方据此静默返回。
+async function sendEntry(method, path, body) {
+  try {
+    return await api(method, path, body);
+  } catch (err) {
+    if (err.status === 409 && err.data && err.data.conflicts && err.data.conflicts.length) {
+      const lines = err.data.conflicts.slice(0, 3)
+        .map(c => `  ${fmtTime(c.start_time)}-${c.end_time ? fmtTime(c.end_time) : '进行中'} ${entryTitle(c)}`)
+        .join('\n');
+      const more = err.data.conflicts.length > 3 ? `\n  …等 ${err.data.conflicts.length} 条` : '';
+      const ok = confirm(`该时间段与已有记录重叠：\n${lines}${more}\n\n继续保存会导致工时被重复统计，是否继续？`);
+      if (!ok) { err.handled = true; throw err; }
+      return await api(method, path, { ...body, allow_overlap: true });
+    }
+    throw err;
+  }
+}
+
 // 补录模式：手动配置起止时间
 async function onBackfillAdd() {
   const sd = $('#bf-date').value || todayStr();
@@ -401,15 +463,18 @@ async function onBackfillAdd() {
     tag_id: $('#bf-todo').value ? null : ($('#bf-group').value ? Number($('#bf-group').value) : null),
   };
   try {
-    await api('POST', '/api/time-entries', body);
+    await sendEntry('POST', '/api/time-entries', body);
+    // 连续补录：保留日期与标签/任务选择，开始时间接上本次结束时间。
     $('#bf-note').value = '';
-    startInput.value = '';
+    startInput.value = en || currentTime();
     $('#bf-end').value = '';
     await refreshActiveEntry();
     renderRecorder();
     await renderTodayTimelineAnalysis();
     await renderTodayEntries();
-  } catch (e) { alert(e.message); }
+  } catch (e) {
+    if (!e.handled) alert(e.message);
+  }
 }
 
 // 时间轴 + 每日分析 合并展示
@@ -772,7 +837,31 @@ function bindTodayTaskDrag(item, todo) {
 }
 
 // ---- Inline Todo Analysis (below todo item) ----
-let inlineAnalysisState = { todo: null, month: '', container: null };
+// Each container owns its render state so multiple expanded tasks cannot
+// overwrite one another, and stale month requests can be ignored safely.
+const inlineAnalysisRenders = new WeakMap();
+
+function beginInlineAnalysisRender(container, todoID, month) {
+  const previous = inlineAnalysisRenders.get(container);
+  const state = {
+    todoID,
+    month,
+    renderID: (previous ? previous.renderID : 0) + 1,
+  };
+  inlineAnalysisRenders.set(container, state);
+  container.replaceChildren();
+  return state;
+}
+
+function isCurrentInlineAnalysisRender(container, state) {
+  return container.isConnected !== false && inlineAnalysisRenders.get(container) === state;
+}
+
+function commitInlineAnalysisRender(container, state, nodes) {
+  if (!isCurrentInlineAnalysisRender(container, state)) return false;
+  container.replaceChildren(...nodes);
+  return true;
+}
 
 function toggleInlineAnalysis(t, todoItem) {
   // Remove existing inline analysis if any
@@ -818,8 +907,9 @@ async function renderInlineAnalysis(t, container) {
     const totalSecs = allEntries.reduce((acc, e) => acc + entryDurationSecs(e), 0);
     const totalDur = fmtDurationSecs(totalSecs);
     const monthSecs = monthEntries.reduce((acc, e) => acc + entryDurationSecs(e), 0);
+    const nodes = [];
 
-    container.appendChild(el('div', { class: 'analysis-head' },
+    nodes.push(el('div', { class: 'analysis-head' },
       el('h3', {}, '📊 ' + t.title + ' 分析'),
       el('button', { class: 'btn btn-small', onclick: () => container.remove() }, '✕ 关闭')
     ));
@@ -829,7 +919,7 @@ async function renderInlineAnalysis(t, container) {
     grid.appendChild(statCard('累计总工时', totalDur, allEntries.length + ' 条记录'));
     grid.appendChild(statCard('本月工时', fmtDurationSecs(monthSecs), monthEntries.length + ' 条记录'));
     grid.appendChild(statCard('子任务数', String(descCount), todoStatusLabel(t)));
-    container.appendChild(grid);
+    nodes.push(grid);
 
     // Monthly heatmap with navigation
     container.appendChild(el('h4', {}, '月度热力图'));
@@ -837,31 +927,33 @@ async function renderInlineAnalysis(t, container) {
     container.appendChild(buildHeatmap(monthEntries, month));
 
     // Legend
-    container.appendChild(buildHeatmapLegend());
+    nodes.push(buildHeatmapLegend());
 
     // Show todo description
     if (t.description && t.description.trim()) {
-      container.appendChild(el('div', { class: 'todo-desc' },
+      nodes.push(el('div', { class: 'todo-desc' },
         el('h4', {}, '描述'),
         el('p', {}, t.description)
       ));
     }
 
     if (allEntries.length === 0) {
-      container.appendChild(emptyHint('该任务暂没有时间记录'));
+      nodes.push(emptyHint('该任务暂没有时间记录'));
+      commitInlineAnalysisRender(container, renderState, nodes);
       return;
     }
-    container.appendChild(el('h4', { class: 'mt-4' }, '时间记录列表'));
+    nodes.push(el('h4', { class: 'mt-4' }, '时间记录列表'));
     for (const e of monthEntries) {
-      container.appendChild(buildEntryRow(e, () => renderInlineAnalysis(t, container)));
+      nodes.push(buildEntryRow(e, () => renderInlineAnalysis(t, container, renderState.month)));
     }
+    commitInlineAnalysisRender(container, renderState, nodes);
   } catch (err) {
     commitInlineAnalysisRender(container, token, [emptyHint('加载失败：' + err.message)]);
   }
 }
 
-function buildHeatmapNav() {
-  const [y, m] = inlineAnalysisState.month.split('-').map(Number);
+function buildHeatmapNav(renderState) {
+  const [y, m] = renderState.month.split('-').map(Number);
   const prevM = m === 1 ? 12 : m - 1;
   const prevY = m === 1 ? y - 1 : y;
   const nextM = m === 12 ? 1 : m + 1;
@@ -871,9 +963,9 @@ function buildHeatmapNav() {
   const label = y + '年' + m + '月';
 
   return el('div', { class: 'heatmap-nav' },
-    el('button', { class: 'btn btn-small', onclick: () => { inlineAnalysisState.month = prevStr; renderInlineAnalysis(inlineAnalysisState.todo, inlineAnalysisState.container); } }, '◀'),
+    el('button', { class: 'btn btn-small', onclick: () => renderInlineAnalysis(renderState.todo, renderState.container, prevStr) }, '◀'),
     el('span', { class: 'heatmap-month' }, label),
-    el('button', { class: 'btn btn-small', onclick: () => { inlineAnalysisState.month = nextStr; renderInlineAnalysis(inlineAnalysisState.todo, inlineAnalysisState.container); } }, '▶'),
+    el('button', { class: 'btn btn-small', onclick: () => renderInlineAnalysis(renderState.todo, renderState.container, nextStr) }, '▶'),
   );
 }
 
@@ -1019,10 +1111,77 @@ function buildTimelineTrack(entries, showNow, viewDate, zoom) {
     host.dataset.nowTrack = 'true';
     host.dataset.rangeStartMs = String(rangeStartMs);
     host.dataset.rangeEndMs = String(rangeEndMs);
+    host.dataset.viewDate = dateStr;
     host.appendChild(el('div', { class: 'tl-now', 'data-timeline-now': 'true' }));
     updateTimelineNow(host);
+    enableTimelineDrag(host);
   }
   return host;
+}
+
+// 在时间轴空白处横向拖动即可圈选一段时间并打开补录弹窗。
+// 坐标换算复用容器上的 rangeStartMs/rangeEndMs，因此「全天」与「工作时段」两种缩放都适用。
+function enableTimelineDrag(host) {
+  const SNAP_MS = 5 * 60 * 1000;   // 吸附到 5 分钟
+  const MIN_MS = SNAP_MS;          // 小于此跨度视为点击，不弹窗
+  let dragging = false;
+  let sel = null;
+
+  const msFromClientX = (clientX) => {
+    const rect = host.getBoundingClientRect();
+    if (!rect.width) return NaN;
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    const start = Number(host.dataset.rangeStartMs);
+    const end = Number(host.dataset.rangeEndMs);
+    return start + ratio * (end - start);
+  };
+  const snap = (ms) => Math.round(ms / SNAP_MS) * SNAP_MS;
+  const paint = (lo, hi) => {
+    const start = Number(host.dataset.rangeStartMs);
+    const end = Number(host.dataset.rangeEndMs);
+    sel.style.left = `${(lo - start) / (end - start) * 100}%`;
+    sel.style.width = `${(hi - lo) / (end - start) * 100}%`;
+  };
+  const span = (clientX) => {
+    const anchor = Number(sel.dataset.anchor);
+    const other = snap(msFromClientX(clientX));
+    return [Math.min(anchor, other), Math.max(anchor, other)];
+  };
+  const cleanup = (ev) => {
+    dragging = false;
+    if (sel) { sel.remove(); sel = null; }
+    if (ev && host.hasPointerCapture?.(ev.pointerId)) host.releasePointerCapture(ev.pointerId);
+  };
+
+  host.addEventListener('pointerdown', (ev) => {
+    // Starting on an existing block keeps its edit behaviour.
+    if (ev.button !== 0 || ev.target.closest('.tl-block')) return;
+    const anchor = snap(msFromClientX(ev.clientX));
+    if (!Number.isFinite(anchor)) return;
+    dragging = true;
+    sel = el('div', { class: 'tl-select' });
+    sel.dataset.anchor = String(anchor);
+    host.appendChild(sel);
+    paint(anchor, anchor);
+    host.setPointerCapture?.(ev.pointerId);
+    ev.preventDefault();
+  });
+  host.addEventListener('pointermove', (ev) => {
+    if (!dragging || !sel) return;
+    const [lo, hi] = span(ev.clientX);
+    paint(lo, hi);
+  });
+  host.addEventListener('pointerup', (ev) => {
+    if (!dragging || !sel) return;
+    const [lo, hi] = span(ev.clientX);
+    const connected = host.isConnected;
+    const viewDate = host.dataset.viewDate;
+    cleanup(ev);
+    // A re-render during the drag would open the modal against a stale range.
+    if (!connected || hi - lo < MIN_MS) return;
+    openEntryModal(null, { date: viewDate, startMs: lo, endMs: hi });
+  });
+  host.addEventListener('pointercancel', cleanup);
 }
 
 // Keeps the red "now" line moving even when no timer is running. Tracks carry
@@ -1068,9 +1227,11 @@ function updateTimelineNow(track) {
   }
 }
 function buildAxis(zoom) {
-  const z = zoom || '12h';
-  const startH = z === '12h' ? 9 : 0;
-  const endH = z === '12h' ? 21 : 24;
+  // Ticks must follow the same range as the track, otherwise the labels and the
+  // block percentages drift apart once the work range differs from 9-21.
+  const { start, end } = timelineRange(zoom || '12h');
+  const startH = Math.max(0, Math.min(23, Math.floor(start)));
+  const endH = Math.max(startH + 1, Math.min(24, Math.ceil(end)));
   const totalSlots = endH - startH;
   const axis = el('div', { class: 'tl-axis', style: `grid-template-columns: repeat(${totalSlots}, 1fr)` });
   for (let h = startH; h < endH; h++) {
@@ -1675,12 +1836,15 @@ function openTodoModal(t) {
   openModal(isNew ? (isChild ? '新建子任务' : '新建任务') : '编辑任务', form);
 }
 
-function openEntryModal(e, defaultDate) {
+// openEntryModal edits an existing entry (e), or creates one when e is null.
+// opts {date, startMs, endMs} prefills the create form, e.g. from a timeline drag.
+function openEntryModal(e, opts) {
   const isNew = !e;
-  const startDate = e ? e.start_time.slice(0, 10) : (defaultDate || todayStr());
-  const endDate = e && e.end_time ? e.end_time.slice(0, 10) : startDate;
-  const startTime = e ? e.start_time.slice(11, 16) : '09:00';
-  const endTime = e && e.end_time ? e.end_time.slice(11, 16) : '';
+  const o = opts || {};
+  const startDate = e ? e.start_time.slice(0, 10) : (o.date || todayStr());
+  const endDate = e && e.end_time ? e.end_time.slice(0, 10) : (o.endMs ? ymd(o.endMs) : startDate);
+  const startTime = e ? e.start_time.slice(11, 16) : (o.startMs ? hhmm(o.startMs) : '09:00');
+  const endTime = e && e.end_time ? e.end_time.slice(11, 16) : (o.endMs ? hhmm(o.endMs) : '');
   const initialTodoId = e && e.todo_id ? e.todo_id : null;
 
   const startDateField = field('开始日期', input('date', startDate));
@@ -1786,12 +1950,14 @@ function openEntryModal(e, defaultDate) {
         todo_id: todoId,
       };
       try {
-        if (isNew) await api('POST', '/api/time-entries', body);
-        else await api('PUT', '/api/time-entries/' + e.id, body);
+        await sendEntry(isNew ? 'POST' : 'PUT',
+          isNew ? '/api/time-entries' : '/api/time-entries/' + e.id, body);
         closeModal();
         await refreshActiveEntry();
         renderView(state.view);
-      } catch (err) { alert(err.message); }
+      } catch (err) {
+        if (!err.handled) alert(err.message);
+      }
     } }, '保存'));
   form.appendChild(actions);
   openModal(isNew ? '补录工时' : '编辑工时', form);

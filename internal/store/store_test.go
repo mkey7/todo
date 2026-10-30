@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"testing"
 
 	"todo/internal/db"
@@ -302,11 +303,11 @@ func TestListEntriesForDayOverlap(t *testing.T) {
 	d := newTestDB(t)
 	g, _ := CreateTag(d, models.Tag{Name: "开发", Color: "#6366f1"})
 	// entry fully within the day
-	CreateEntry(d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 09:00:00", EndTime: strPtr("2026-07-14 10:00:00")})
+	CreateEntry(d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 09:00:00", EndTime: strPtr("2026-07-14 10:00:00")}, WriteOptions{})
 	// entry that ends exactly at day start should NOT appear (end > dayStart is required, 00:00:00 is not > 00:00:00)
-	CreateEntry(d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-13 22:00:00", EndTime: strPtr("2026-07-14 00:00:00")})
+	CreateEntry(d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-13 22:00:00", EndTime: strPtr("2026-07-14 00:00:00")}, WriteOptions{})
 	// entry starting just before midnight and ending mid-day should appear (overlap)
-	CreateEntry(d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 23:30:00", EndTime: strPtr("2026-07-15 01:00:00")})
+	CreateEntry(d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 23:30:00", EndTime: strPtr("2026-07-15 01:00:00")}, WriteOptions{})
 
 	es, err := ListEntriesForDay(d, "2026-07-14")
 	if err != nil {
@@ -316,6 +317,130 @@ func TestListEntriesForDayOverlap(t *testing.T) {
 	if len(es) != 2 {
 		t.Fatalf("expected 2 entries, got %d: %+v", len(es), es)
 	}
+}
+
+func TestCreateEntryRejectsOverlap(t *testing.T) {
+	d := newTestDB(t)
+	g, _ := CreateTag(d, models.Tag{Name: "开发", Color: "#6366f1"})
+	mustCreate(t, d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 09:00:00", EndTime: strPtr("2026-07-14 10:00:00")})
+
+	overlapping := models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 09:30:00", EndTime: strPtr("2026-07-14 10:30:00")}
+	_, err := CreateEntry(d, overlapping, WriteOptions{})
+	var oe *OverlapError
+	if !errors.As(err, &oe) {
+		t.Fatalf("expected OverlapError, got %v", err)
+	}
+	if len(oe.Conflicts) != 1 {
+		t.Fatalf("expected 1 conflict, got %d: %+v", len(oe.Conflicts), oe.Conflicts)
+	}
+	// The conflicting entry carries joined display fields for the client.
+	if oe.Conflicts[0].TagName != "开发" {
+		t.Errorf("conflict should include tag_name, got %q", oe.Conflicts[0].TagName)
+	}
+
+	if _, err := CreateEntry(d, overlapping, WriteOptions{AllowOverlap: true}); err != nil {
+		t.Fatalf("AllowOverlap should accept the entry: %v", err)
+	}
+}
+
+func TestCreateEntryAllowsAdjacent(t *testing.T) {
+	d := newTestDB(t)
+	g, _ := CreateTag(d, models.Tag{Name: "开发", Color: "#6366f1"})
+	mustCreate(t, d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 09:00:00", EndTime: strPtr("2026-07-14 10:00:00")})
+
+	// Touching intervals are not a conflict: chained back-filling relies on it.
+	if _, err := CreateEntry(d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 10:00:00", EndTime: strPtr("2026-07-14 11:00:00")}, WriteOptions{}); err != nil {
+		t.Fatalf("adjacent entry should be accepted: %v", err)
+	}
+}
+
+func TestUpdateEntryExcludesSelf(t *testing.T) {
+	d := newTestDB(t)
+	g, _ := CreateTag(d, models.Tag{Name: "开发", Color: "#6366f1"})
+	e := mustCreate(t, d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 09:00:00", EndTime: strPtr("2026-07-14 10:00:00")})
+
+	// Editing only the note must not flag the entry as conflicting with itself.
+	same := e
+	same.Note = "补充说明"
+	if _, err := UpdateEntry(d, e.ID, same, WriteOptions{}); err != nil {
+		t.Fatalf("self-update should be allowed: %v", err)
+	}
+
+	other := mustCreate(t, d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 11:00:00", EndTime: strPtr("2026-07-14 12:00:00")})
+	moved := other
+	moved.StartTime = "2026-07-14 09:30:00"
+	moved.EndTime = strPtr("2026-07-14 10:30:00")
+	if _, err := UpdateEntry(d, other.ID, moved, WriteOptions{}); !errors.As(err, new(*OverlapError)) {
+		t.Fatalf("expected OverlapError, got %v", err)
+	}
+}
+
+func TestCreateEntrySecondActiveRejected(t *testing.T) {
+	d := newTestDB(t)
+	g, _ := CreateTag(d, models.Tag{Name: "开发", Color: "#6366f1"})
+	if _, err := CreateEntry(d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 09:00:00"}, WriteOptions{}); err != nil {
+		t.Fatalf("first in-progress entry should be accepted: %v", err)
+	}
+
+	// allow_overlap waives overlaps only, never the single-running-entry rule.
+	_, err := CreateEntry(d, models.TimeEntry{TagID: &g.ID, StartTime: "2026-07-14 10:00:00"}, WriteOptions{AllowOverlap: true})
+	if !errors.As(err, new(ActiveEntryError)) {
+		t.Fatalf("expected ActiveEntryError, got %v", err)
+	}
+}
+
+func TestActiveEntryPicksMostRecent(t *testing.T) {
+	d := newTestDB(t)
+	g, _ := CreateTag(d, models.Tag{Name: "开发", Color: "#6366f1"})
+	// Two in-progress rows can only predate the validation, so insert directly.
+	for _, start := range []string{"2026-07-14 09:00:00", "2026-07-14 11:00:00"} {
+		if _, err := d.Exec(`INSERT INTO time_entries (tag_id, start_time) VALUES (?, ?)`, g.ID, start); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	active, err := ActiveEntry(d)
+	if err != nil {
+		t.Fatalf("active: %v", err)
+	}
+	if active == nil || active.StartTime != "2026-07-14 11:00:00" {
+		t.Fatalf("ActiveEntry should pick the most recent, got %+v", active)
+	}
+	stopped, err := StopEntry(d)
+	if err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if stopped.ID != active.ID {
+		t.Errorf("StopEntry (%d) and ActiveEntry (%d) disagree", stopped.ID, active.ID)
+	}
+}
+
+func TestCreateEntryRejectsBadTimeFormat(t *testing.T) {
+	d := newTestDB(t)
+	if _, err := CreateEntry(d, models.TimeEntry{StartTime: "2026-7-4 9:00"}, WriteOptions{}); err == nil {
+		t.Fatal("non-canonical start time should be rejected")
+	}
+	if _, err := CreateEntry(d, models.TimeEntry{StartTime: "2026-07-14 09:00:00", EndTime: strPtr("nonsense")}, WriteOptions{}); err == nil {
+		t.Fatal("non-canonical end time should be rejected")
+	}
+}
+
+func TestUpdateEntryNotFound(t *testing.T) {
+	d := newTestDB(t)
+	_, err := UpdateEntry(d, 4242, models.TimeEntry{StartTime: "2026-07-14 09:00:00", EndTime: strPtr("2026-07-14 10:00:00")}, WriteOptions{})
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected sql.ErrNoRows, got %v", err)
+	}
+}
+
+// mustCreate inserts an entry, failing the test on error.
+func mustCreate(t *testing.T, d *sql.DB, e models.TimeEntry) models.TimeEntry {
+	t.Helper()
+	created, err := CreateEntry(d, e, WriteOptions{})
+	if err != nil {
+		t.Fatalf("create entry: %v", err)
+	}
+	return created
 }
 
 func strPtr(s string) *string { return &s }
